@@ -10,12 +10,14 @@ use slint_doc::Document;
 use storage::ProjectStore;
 
 use crate::session::{Corner, Session, TreeAction, TreeRow};
-use crate::{Editor, TreeRowItem};
+use crate::{Editor, PropItem, TreeRowItem};
 
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 4.0;
 const DEFAULT_PROJECT: &str = "default";
 const DEFAULT_FILE: &str = "main.slint";
+const PROP_DEBOUNCE: Duration = Duration::from_millis(300);
+const SOURCE_TAB: i32 = 3;
 
 thread_local! {
     static SAVE_HOOK: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
@@ -82,6 +84,11 @@ pub struct Glue {
     zoom: f32,
     /// False when the file could not be read; saving is refused then.
     loaded: bool,
+    /// Start and text of the range the Source tab shows, as it is in the document.
+    source_view: Option<(usize, String)>,
+    /// A property edit waiting for its debounce timer.
+    pending_prop: Option<(String, String)>,
+    prop_timer: slint::Timer,
 }
 
 type Shared = Rc<RefCell<Glue>>;
@@ -169,6 +176,53 @@ impl Glue {
         ed.set_palette(to_model(self.session.palette()));
     }
 
+    fn refresh_props(&self) {
+        let rows: Vec<PropItem> = self
+            .session
+            .properties()
+            .into_iter()
+            .map(|r| PropItem { name: r.name.into(), value: r.expr.into() })
+            .collect();
+        self.editor().set_props(ModelRc::new(VecModel::from(rows)));
+    }
+
+    fn show_source(&mut self, range: Option<std::ops::Range<usize>>, title: &str) {
+        let ed = self.editor();
+        let text = range.as_ref().and_then(|r| self.session.doc().text().get(r.clone()));
+        match (range.as_ref(), text) {
+            (Some(r), Some(t)) => {
+                ed.set_source_text(t.into());
+                self.source_view = Some((r.start, t.to_string()));
+                ed.set_source_title(title.into());
+            }
+            _ => {
+                ed.set_source_text("".into());
+                self.source_view = None;
+                ed.set_source_title("".into());
+            }
+        }
+    }
+
+    /// Shows the selected element (else the current component) in the Source tab.
+    fn refresh_source(&mut self) {
+        let title = match self.session.selection() {
+            Some(p) => self
+                .session
+                .tree_rows()
+                .into_iter()
+                .find(|r| &r.path == p)
+                .map_or_else(String::new, |r| r.label),
+            None => self.session.component().to_string(),
+        };
+        let range = self.session.source_range();
+        self.show_source(range, &title);
+    }
+
+    fn refresh_panels(&mut self) {
+        self.refresh_props();
+        self.refresh_source();
+    }
+
     pub fn update_overlay(&self) {
         self.refresh_tree();
         let ed = self.editor();
@@ -187,6 +241,10 @@ impl Glue {
     /// Recompiles and swaps the preview; on a compile error the old preview stays and the
     /// first diagnostic is shown in the error band.
     fn rebuild(&mut self) {
+        self.rebuild_with(true, true);
+    }
+
+    fn rebuild_with(&mut self, props: bool, source: bool) {
         let factory = self.session.rebuild();
         let ed = self.editor();
         match factory {
@@ -200,6 +258,12 @@ impl Glue {
             }
         }
         self.update_overlay();
+        if props {
+            self.refresh_props();
+        }
+        if source {
+            self.refresh_source();
+        }
         self.sync_status();
     }
 
@@ -224,6 +288,7 @@ impl Glue {
 
     /// Saves if there are unsaved edits. Returns false when a save was needed and failed.
     pub fn save(&mut self) -> bool {
+        self.flush_prop();
         let ed = self.editor();
         ed.set_message("".into());
         let r = save_if_dirty(
@@ -255,14 +320,17 @@ impl Glue {
     }
 
     fn tree_selected(&mut self, row: i32) {
+        self.flush_prop();
         self.editor().set_message("".into());
         if let Some(r) = self.session.tree_rows().into_iter().nth(row as usize) {
             self.session.select_path(r.path);
         }
         self.update_overlay();
+        self.refresh_panels();
     }
 
     fn tree_action(&mut self, action: i32) {
+        self.flush_prop();
         self.editor().set_message("".into());
         let action = match action {
             0 => TreeAction::Up,
@@ -280,24 +348,29 @@ impl Glue {
     }
 
     fn palette_picked(&mut self, name: &str) {
+        self.flush_prop();
         self.editor().set_message("".into());
         let r = self.session.add_from_palette(name);
         self.after_edit(r);
     }
 
     fn tapped(&mut self, x: f32, y: f32) {
+        self.flush_prop();
         self.editor().set_message("".into());
         self.session.tap(x / self.zoom, y / self.zoom);
         self.update_overlay();
+        self.refresh_panels();
     }
 
     fn drag_finished(&mut self, dx: f32, dy: f32) {
+        self.flush_prop();
         self.editor().set_message("".into());
         let r = self.session.move_selection(dx / self.zoom, dy / self.zoom);
         self.after_edit(r);
     }
 
     fn resize_finished(&mut self, corner: i32, dx: f32, dy: f32) {
+        self.flush_prop();
         self.editor().set_message("".into());
         let r = self
             .session
@@ -306,11 +379,72 @@ impl Glue {
     }
 
     fn history(&mut self, undo: bool) {
+        self.flush_prop();
         self.editor().set_message("".into());
         let changed = if undo { self.session.undo() } else { self.session.redo() };
         if changed {
             self.rebuild();
         }
+    }
+
+    /// Queues a property edit; it is applied 300 ms after the last keystroke.
+    fn prop_edited(&mut self, name: &str, value: &str) {
+        self.pending_prop = Some((name.to_string(), value.to_string()));
+        let me = self.me.clone();
+        self.prop_timer.start(slint::TimerMode::SingleShot, PROP_DEBOUNCE, move || {
+            if let Some(g) = me.upgrade()
+                && let Ok(mut g) = g.try_borrow_mut()
+            {
+                // The edit field keeps its text and focus: only the preview is rebuilt.
+                g.commit_prop(false);
+            }
+        });
+    }
+
+    fn prop_accepted(&mut self, name: &str, value: &str) {
+        self.pending_prop = Some((name.to_string(), value.to_string()));
+        self.commit_prop(true);
+    }
+
+    fn flush_prop(&mut self) {
+        if self.pending_prop.is_some() {
+            self.commit_prop(true);
+        }
+    }
+
+    fn commit_prop(&mut self, refresh_props: bool) {
+        self.prop_timer.stop();
+        let Some((name, value)) = self.pending_prop.take() else { return };
+        self.editor().set_message("".into());
+        match self.session.set_property(&name, &value) {
+            Ok(()) => self.rebuild_with(refresh_props, true),
+            Err(e) => self.set_error(&e.to_string()),
+        }
+    }
+
+    /// Replaces the shown source range of the document with the edited text.
+    fn source_apply(&mut self, text: &str) {
+        self.flush_prop();
+        let Some((start, original)) = self.source_view.clone() else {
+            self.set_error("Nothing to apply: the source is not shown");
+            return;
+        };
+        match self.session.replace_source(start, &original, text) {
+            Ok(()) => {
+                self.source_view = Some((start, text.to_string()));
+                // Keep the typed text visible, also when it does not compile.
+                self.rebuild_with(true, false);
+            }
+            Err(e) => self.set_error(&e.to_string()),
+        }
+    }
+
+    /// Error band tap: shows the component containing the first diagnostic in the Source tab.
+    fn error_tapped(&mut self) {
+        let Some(diag) = self.session.diagnostics().first().cloned() else { return };
+        let range = self.session.component_range_at(diag.offset);
+        self.show_source(Some(range), "Error location");
+        self.editor().set_panel_tab(SOURCE_TAB);
     }
 
     fn zoom_by(&mut self, m: f32) {
@@ -363,6 +497,10 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_tree_selected, |g, i| g.tree_selected(i));
     on!(on_tree_action, |g, a| g.tree_action(a));
     on!(on_palette_picked, |g, n| g.palette_picked(&n));
+    on!(on_prop_edited, |g, n, v| g.prop_edited(&n, &v));
+    on!(on_prop_accepted, |g, n, v| g.prop_accepted(&n, &v));
+    on!(on_source_apply, |g, t| g.source_apply(&t));
+    on!(on_error_tapped, |g| g.error_tapped());
     on!(on_zoom, |g, m| g.zoom_by(m));
 }
 
@@ -396,6 +534,9 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
             file,
             session,
             zoom: 1.0,
+            source_view: None,
+            pending_prop: None,
+            prop_timer: slint::Timer::default(),
         })
     });
     connect(editor, &glue);

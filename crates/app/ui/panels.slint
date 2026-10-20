@@ -1,10 +1,15 @@
-import { LineEdit, ListView } from "std-widgets.slint";
+import { LineEdit, ListView, TextEdit } from "std-widgets.slint";
 
 export struct TreeRowItem {
     label: string,
     depth: int,
     is-layout: bool,
     selected: bool,
+}
+
+export struct PropItem {
+    name: string,
+    value: string,
 }
 
 export component ToolButton inherits Rectangle {
@@ -36,6 +41,12 @@ export component BottomPanel inherits Rectangle {
     in-out property <int> tab: 0;
     in property <[TreeRowItem]> tree-rows;
     in property <[string]> palette;
+    in property <[PropItem]> props;
+    in property <string> source-title;
+    in-out property <string> source-text;
+    callback prop-edited(string, string);
+    callback prop-accepted(string, string);
+    callback source-apply(string);
     callback tree-selected(int);
     // 0 up, 1 down, 2 out, 3 in, 4 delete, 5 new container
     callback tree-action(int);
@@ -71,7 +82,7 @@ export component BottomPanel inherits Rectangle {
             }
         }
         HorizontalLayout {
-            height: 36px;
+            height: 44px;
             for name[i] in root.tab-names: Rectangle {
                 background: root.tab == i ? #3a4a5c : transparent;
                 Text {
@@ -92,7 +103,7 @@ export component BottomPanel inherits Rectangle {
                 spacing: 4px;
                 HorizontalLayout {
                     spacing: 3px;
-                    height: 34px;
+                    height: 44px;
                     ToolButton { text: "Up"; clicked => { root.tree-action(0); } }
                     ToolButton { text: "Down"; clicked => { root.tree-action(1); } }
                     ToolButton { text: "Out"; clicked => { root.tree-action(2); } }
@@ -102,7 +113,7 @@ export component BottomPanel inherits Rectangle {
                 }
                 ListView {
                     for row[i] in root.tree-rows: Rectangle {
-                        height: 34px;
+                        height: 44px;
                         background: row.selected ? #3a4a5c : transparent;
                         Text {
                             x: 8px + row.depth * 16px;
@@ -119,7 +130,7 @@ export component BottomPanel inherits Rectangle {
             }
             if root.tab == 1: ListView {
                 for name in root.palette: Rectangle {
-                    height: 38px;
+                    height: 44px;
                     Text {
                         x: 12px;
                         text: "+  " + name;
@@ -128,6 +139,49 @@ export component BottomPanel inherits Rectangle {
                         vertical-alignment: center;
                     }
                     TouchArea { clicked => { root.palette-picked(name); } }
+                }
+            }
+            if root.tab == 2: ListView {
+                for p in root.props: Rectangle {
+                    height: 44px;
+                    Text {
+                        x: 8px;
+                        width: 38%;
+                        text: p.name;
+                        color: p.value == "" ? #8a9199 : white;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    LineEdit {
+                        x: parent.width * 0.4;
+                        y: 2px;
+                        width: parent.width - self.x - 6px;
+                        height: 40px;
+                        text: p.value;
+                        edited(t) => { root.prop-edited(p.name, t); }
+                        accepted(t) => { root.prop-accepted(p.name, t); }
+                    }
+                }
+            }
+            if root.tab == 3: VerticalLayout {
+                padding: 4px;
+                spacing: 4px;
+                Text {
+                    text: root.source-title;
+                    color: #9aa3ad;
+                    font-size: 12px;
+                    overflow: elide;
+                }
+                src := TextEdit {
+                    vertical-stretch: 1;
+                    font-size: 13px;
+                    text <=> root.source-text;
+                }
+                ToolButton {
+                    text: "Apply";
+                    height: 44px;
+                    clicked => { root.source-apply(src.text); }
                 }
             }
         }
@@ -145,7 +199,7 @@ export component MenuList inherits Rectangle {
         Text { text: root.title; color: #9aa3ad; font-size: 12px; }
         ListView {
             for item in root.items: Rectangle {
-                height: 34px;
+                height: 44px;
                 background: item == root.current ? #3a4a5c : transparent;
                 Text {
                     x: 8px;
@@ -163,7 +217,7 @@ export component MenuList inherits Rectangle {
 export component NewProject inherits HorizontalLayout {
     callback create(string);
     spacing: 6px;
-    height: 34px;
+    height: 44px;
     name := LineEdit { placeholder-text: "new project"; }
     ToolButton {
         text: "Create";

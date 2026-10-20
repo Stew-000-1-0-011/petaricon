@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use app::session::{Corner, Session, SessionError};
+use app::session::{Corner, PropKind, Session, SessionError};
 use slint_doc::{Document, ElementPath};
 
 const SRC: &str = r#"export component Main inherits Rectangle {
@@ -441,4 +441,110 @@ fn import_alias_counts_as_present() {
     let h = "import { Button as B } from \"std-widgets.slint\";\n";
     let (src, out) = add_widget(h, "Button");
     assert_eq!(without_new_element(&out), src);
+}
+
+// ---- properties and source ----
+
+#[test]
+fn properties_put_geometry_first() {
+    let mut s = session();
+    select(&mut s, &[0]);
+    let rows = s.properties();
+    let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["x", "y", "width", "height", "background", "border-radius", "border-width", "border-color"]
+    );
+    assert_eq!(rows[0].expr, "10px");
+    assert_eq!(rows[4].expr, "");
+    assert_eq!(rows[0].kind, PropKind::Length);
+    assert_eq!(rows[4].kind, PropKind::Color);
+    select(&mut s, &[1]);
+    let names: Vec<String> = s.properties().into_iter().map(|r| r.name).collect();
+    assert_eq!(&names[4..6], ["spacing", "padding"]);
+    assert!(names.contains(&"y".to_string()));
+    select(&mut s, &[1, 0]);
+    let rows = s.properties();
+    assert_eq!(&rows[4].name, "text");
+    assert_eq!(rows[4].expr, "\"in\"");
+}
+
+#[test]
+fn set_length_adds_px() {
+    let mut s = session();
+    select(&mut s, &[0]);
+    s.set_property("x", "12").unwrap();
+    assert!(s.doc().text().contains("x: 12px;"));
+    s.set_property("y", "-3.5").unwrap();
+    assert!(s.doc().text().contains("y: -3.5px;"));
+    s.set_property("width", "50%").unwrap();
+    assert!(s.doc().text().contains("width: 50%;"));
+}
+
+#[test]
+fn set_text_quotes() {
+    let mut s = session();
+    select(&mut s, &[1, 0]);
+    s.set_property("text", "停止").unwrap();
+    assert!(s.doc().text().contains("text: \"停止\";"));
+    s.set_property("text", "a\"b\\c").unwrap();
+    assert!(s.doc().text().contains(r#"text: "a\"b\\c";"#));
+    s.set_property("text", "\"done\"").unwrap();
+    assert!(s.doc().text().contains("text: \"done\";"));
+    s.set_property("color", "#ff0000").unwrap();
+    assert!(s.doc().text().contains("color: #ff0000;"));
+}
+
+#[test]
+fn empty_value_removes() {
+    let mut s = session();
+    select(&mut s, &[0]);
+    s.set_property("x", "").unwrap();
+    assert!(!s.doc().text().contains("        x: 10px;\n        y: 10px;\n        width: 100px"));
+    assert!(s.doc().text().contains("a := Rectangle {\n        y: 10px;"));
+    assert_eq!(s.properties()[0].expr, "");
+}
+
+#[test]
+fn set_property_without_selection_is_refused() {
+    let mut s = session();
+    assert!(matches!(s.set_property("x", "1"), Err(SessionError::NoSelection)));
+}
+
+#[test]
+fn source_range_is_selection_or_component() {
+    let mut s = session();
+    let whole = s.source_range().unwrap();
+    assert!(s.doc().text()[whole.clone()].starts_with("export component Main"));
+    assert!(s.doc().text()[whole].ends_with('}'));
+    select(&mut s, &[0, 0]);
+    let r = s.source_range().unwrap();
+    assert!(s.doc().text()[r].starts_with("b := Rectangle {"));
+}
+
+#[test]
+fn replace_source_touches_only_the_range() {
+    let mut s = session();
+    select(&mut s, &[0, 0]);
+    let r = s.source_range().unwrap();
+    let original = s.doc().text()[r.clone()].to_string();
+    let before = s.doc().text().to_string();
+    let new = original.replace("width: 20px;", "width: 21px;");
+    s.replace_source(r.start, &original, &new).unwrap();
+    assert_eq!(s.doc().text(), before.replacen("width: 20px;", "width: 21px;", 1));
+    // stale: the same range no longer holds `original`
+    assert!(matches!(
+        s.replace_source(r.start, &original, "x"),
+        Err(SessionError::StaleSource)
+    ));
+}
+
+#[test]
+fn component_range_at_offset() {
+    let src = "component A inherits Rectangle { }\nexport component B inherits Rectangle { Text { text: \"x\"; } }\n";
+    let s = Session::new(Document::new(PathBuf::from("/t/m.slint"), src.into()));
+    let off = src.find("Text").unwrap() as u32;
+    let r = s.component_range_at(Some(off));
+    assert!(src[r].starts_with("export component B"));
+    assert_eq!(s.component_range_at(None), 0..src.len());
 }

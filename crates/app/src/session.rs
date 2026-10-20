@@ -25,6 +25,75 @@ pub enum SessionError {
     NoGeometry,
     #[error("compile failed")]
     Compile(Vec<Diagnostic>),
+    #[error("the source changed since it was shown; reopen the source tab")]
+    StaleSource,
+}
+
+/// How a property value is entered and normalised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropKind {
+    Length,
+    Color,
+    Text,
+    Other,
+}
+
+/// One row of the property list; `expr` is empty when the property is not set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropRow {
+    pub name: String,
+    pub expr: String,
+    pub kind: PropKind,
+}
+
+pub fn prop_kind(name: &str) -> PropKind {
+    match name {
+        "x" | "y" | "width" | "height" | "spacing" | "border-radius" | "border-width"
+        | "font-size" => PropKind::Length,
+        n if n.starts_with("padding") => PropKind::Length,
+        "color" | "background" | "border-color" => PropKind::Color,
+        "text" => PropKind::Text,
+        _ => PropKind::Other,
+    }
+}
+
+const GEOMETRY_PROPS: [&str; 4] = ["x", "y", "width", "height"];
+const LAYOUT_PROPS: [&str; 8] = [
+    "spacing",
+    "padding",
+    "padding-left",
+    "padding-right",
+    "padding-top",
+    "padding-bottom",
+    "alignment",
+    "cross-axis-alignment",
+];
+const TEXT_PROPS: [&str; 3] = ["text", "color", "font-size"];
+const RECTANGLE_PROPS: [&str; 4] = ["background", "border-radius", "border-width", "border-color"];
+
+/// A bare (optionally negative or decimal) number.
+fn is_bare_number(v: &str) -> bool {
+    let v = v.strip_prefix('-').unwrap_or(v);
+    let mut dots = 0;
+    !v.is_empty()
+        && v.chars().any(|c| c.is_ascii_digit())
+        && v.chars().all(|c| {
+            if c == '.' {
+                dots += 1;
+            }
+            c.is_ascii_digit() || c == '.'
+        })
+        && dots <= 1
+}
+
+fn normalise(kind: PropKind, value: &str) -> String {
+    match kind {
+        PropKind::Length if is_bare_number(value) => format!("{value}px"),
+        PropKind::Text if !value.starts_with('"') => {
+            format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+        }
+        _ => value.to_string(),
+    }
 }
 
 /// One row of the element tree, in depth-first display order.
@@ -340,6 +409,95 @@ impl Session {
                 self.selection = None;
             }
         }
+    }
+
+    /// Property rows of the selection: geometry first, then the ones that suit its kind, then
+    /// any other written binding. Empty without a selection.
+    pub fn properties(&self) -> Vec<PropRow> {
+        let Some(info) = self.selection.as_ref().and_then(|s| self.doc.element(s)) else {
+            return Vec::new();
+        };
+        let mut names: Vec<&str> = GEOMETRY_PROPS.to_vec();
+        if matches!(info.kind, ElementKind::Layout(_)) {
+            names.extend(LAYOUT_PROPS);
+        }
+        match info.type_name.as_str() {
+            "Text" => names.extend(TEXT_PROPS),
+            "Rectangle" => names.extend(RECTANGLE_PROPS),
+            _ => {}
+        }
+        let mut rows: Vec<PropRow> = names
+            .iter()
+            .map(|n| PropRow {
+                name: n.to_string(),
+                expr: info
+                    .bindings
+                    .iter()
+                    .find(|b| b.name == *n)
+                    .map(|b| b.expr.clone())
+                    .unwrap_or_default(),
+                kind: prop_kind(n),
+            })
+            .collect();
+        for b in &info.bindings {
+            if !names.contains(&b.name.as_str()) {
+                rows.push(PropRow {
+                    name: b.name.clone(),
+                    expr: b.expr.clone(),
+                    kind: prop_kind(&b.name),
+                });
+            }
+        }
+        rows
+    }
+
+    /// Sets (or, for an empty value, removes) a property of the selection.
+    pub fn set_property(&mut self, name: &str, value: &str) -> Result<(), SessionError> {
+        let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
+        let value = value.trim();
+        let expr = (!value.is_empty()).then(|| normalise(prop_kind(name), value));
+        self.apply(Op::SetBindings { path, bindings: vec![(name.to_string(), expr)] })
+    }
+
+    /// Byte range of the source the Source tab shows: the selected element, else the whole
+    /// current component.
+    pub fn source_range(&self) -> Option<std::ops::Range<usize>> {
+        match &self.selection {
+            Some(s) => self.doc.element_range(s),
+            None => self.doc.component_range(&self.component),
+        }
+    }
+
+    /// Byte range of the whole component containing `offset`; the whole file when `offset`
+    /// is `None` or lies in no component.
+    pub fn component_range_at(&self, offset: Option<u32>) -> std::ops::Range<usize> {
+        let whole = 0..self.doc.text().len();
+        let Some(offset) = offset else { return whole };
+        let offset = offset as usize;
+        self.doc
+            .components()
+            .into_iter()
+            .filter_map(|c| self.doc.component_range(&c.name))
+            .find(|r| r.contains(&offset) || r.end == offset)
+            .unwrap_or(whole)
+    }
+
+    /// Replaces only `start..start + original.len()` of the document with `new`, provided the
+    /// text there is still `original`; otherwise `StaleSource` and nothing changes.
+    pub fn replace_source(
+        &mut self,
+        start: usize,
+        original: &str,
+        new: &str,
+    ) -> Result<(), SessionError> {
+        let text = self.doc.text();
+        let end = start + original.len();
+        if text.get(start..end) != Some(original) {
+            return Err(SessionError::StaleSource);
+        }
+        let updated = format!("{}{}{}", &text[..start], new, &text[end..]);
+        self.replace_text(updated);
+        Ok(())
     }
 
     pub fn replace_text(&mut self, text: String) {

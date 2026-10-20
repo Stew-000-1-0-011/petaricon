@@ -268,6 +268,25 @@ impl Document {
         Some(element_info(path.clone(), child.as_ref(), &element))
     }
 
+    /// Byte range of the element as the editor extents it: its wrapper (`id :=`, `for`, `if`)
+    /// when it has one, trimmed of surrounding whitespace.
+    pub fn element_range(&self, path: &ElementPath) -> Option<std::ops::Range<usize>> {
+        let root = self.parse();
+        let (wrapper, element) = syntax::resolve(&root, path)?;
+        Some(trimmed_range(&self.text, wrapper.as_ref().unwrap_or(&element)))
+    }
+
+    /// Byte range of a whole component declaration (including a leading `export`).
+    pub fn component_range(&self, name: &str) -> Option<std::ops::Range<usize>> {
+        let root = self.parse();
+        let node = syntax::component_node(&root, name)?;
+        let outer = node
+            .parent()
+            .filter(|p| p.kind() == SyntaxKind::ExportsList)
+            .unwrap_or(node);
+        Some(trimmed_range(&self.text, &outer))
+    }
+
     pub fn path_at_offset(&self, offset: u32) -> Option<ElementPath> {
         let root = self.parse();
         for component in syntax::components(&root) {
@@ -284,6 +303,18 @@ impl Document {
         }
         None
     }
+}
+
+fn trimmed_range(text: &str, node: &SyntaxNode) -> std::ops::Range<usize> {
+    let r = node.text_range();
+    let (mut a, mut b) = (usize::from(r.start()), usize::from(r.end()).min(text.len()));
+    while a < b && text.as_bytes()[a].is_ascii_whitespace() {
+        a += 1;
+    }
+    while b > a && text.as_bytes()[b - 1].is_ascii_whitespace() {
+        b -= 1;
+    }
+    a..b
 }
 
 fn find(element: &SyntaxNode, offset: u32) -> Option<Vec<usize>> {
