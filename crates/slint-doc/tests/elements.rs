@@ -470,3 +470,40 @@ fn inline_remove_and_move() {
         )
     );
 }
+
+#[test]
+fn move_commented_element_before_inline_sibling() {
+    let src = "export component Main inherits Window {
+    a := Rectangle { Text { text: \"x\"; } }
+    Text { text: \"m\"; } // c
+}
+";
+    let mut d = Document::new("m.slint".into(), src.into());
+    d.apply(Op::MoveElement {
+        path: p(&[1]),
+        new_parent: p(&[0]),
+        index: Some(0),
+    })
+    .unwrap();
+    let expected = "export component Main inherits Window {
+    a := Rectangle { Text { text: \"m\"; } // c
+    Text { text: \"x\"; } }
+}
+";
+    assert_eq!(d.text(), expected);
+}
+
+#[test]
+fn remove_line_element_with_trailing_spaces_leaves_no_blank_line() {
+    let src = "export component Main inherits Window {
+    Text { text: \"a\"; }   
+    Text { text: \"b\"; }
+}
+";
+    let mut d = Document::new("m.slint".into(), src.into());
+    d.apply(Op::RemoveElement { path: p(&[0]) }).unwrap();
+    assert_eq!(
+        d.text(),
+        "export component Main inherits Window {\n    Text { text: \"b\"; }\n}\n"
+    );
+}

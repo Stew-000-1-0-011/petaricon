@@ -298,3 +298,27 @@ fn unwrap_then_undo_is_one_step() {
     assert!(d.undo());
     assert_eq!(d.text(), WRAPPED);
 }
+
+#[test]
+fn unwrap_inline_last_child_comment_does_not_swallow_code() {
+    let src = "export component Main inherits Window {
+    panel := Rectangle { VerticalLayout { Text { text: \"a\"; }
+        Text { text: \"b\"; } // c
+    } }
+}
+";
+    let mut d = Document::new("m.slint".into(), src.into());
+    d.apply(Op::Unwrap {
+        layout: p(&[0, 0]),
+        positions: vec![(1, 2), (3, 4)],
+    })
+    .unwrap();
+    let expected = "export component Main inherits Window {
+    panel := Rectangle { Text { x: 1px; y: 2px; text: \"a\"; }
+    Text { x: 3px; y: 4px; text: \"b\"; } // c
+    }
+}
+";
+    assert_eq!(d.text(), expected);
+    assert!(d.element(&p(&[0, 1])).is_some());
+}

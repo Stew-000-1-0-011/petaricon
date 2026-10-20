@@ -213,7 +213,8 @@ fn extent(text: &str, wrapper: &SyntaxNode) -> Extent {
                 rm_start -= 1;
             }
         }
-        let rm_end = e;
+        // Remove the whole line, trailing whitespace included (but keep a `\r`).
+        let rm_end = le - usize::from(le > e && text.as_bytes()[le - 1] == b'\r');
         return Extent {
             start,
             end: e,
@@ -236,6 +237,39 @@ fn extent(text: &str, wrapper: &SyntaxNode) -> Extent {
         end: e,
         remove: (rm_start, e),
         line_mode: false,
+    }
+}
+
+/// Whether the last line of `block` ends in a `//` comment (outside string literals).
+fn ends_in_line_comment(block: &str) -> bool {
+    let last = block.rsplit('\n').next().unwrap_or("");
+    let (mut in_str, mut escaped, mut prev) = (false, false, ' ');
+    for c in last.chars() {
+        if in_str {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_str = false,
+                _ => {}
+            }
+        } else if c == '"' {
+            in_str = true;
+        } else if c == '/' && prev == '/' {
+            return true;
+        }
+        prev = c;
+    }
+    false
+}
+
+/// What to put after `block` when text continues at `at` on the same line: a space, or when
+/// `block` ends in a comment (which would swallow that text) a line break plus `indent`.
+fn block_tail(text: &str, block: &str, at: usize, indent: &str, otherwise: &str) -> String {
+    let rest_blank = text[at..line_end(text, at)].trim().is_empty();
+    if ends_in_line_comment(block) && !rest_blank {
+        format!("\n{indent}")
+    } else {
+        otherwise.to_string()
     }
 }
 
@@ -287,10 +321,15 @@ fn insert_edit(
                 at -= 1;
             }
         }
+        let lead: String = block
+            .chars()
+            .take_while(|c| matches!(c, ' ' | '\t'))
+            .collect();
+        let tail = block_tail(text, block, at, &lead, "");
         return Ok(TextEdit {
             start: at,
             end: at,
-            text: format!("\n{block}"),
+            text: format!("\n{block}{tail}"),
         });
     }
     if let Some(next) = siblings.first() {
@@ -305,7 +344,17 @@ fn insert_edit(
             TextEdit {
                 start: ext.start,
                 end: ext.start,
-                text: format!("{} ", block.trim_start()),
+                text: format!(
+                    "{}{}",
+                    block.trim_start(),
+                    block_tail(
+                        text,
+                        block,
+                        ext.start,
+                        &syntax::line_indent(text, ext.start),
+                        " "
+                    )
+                ),
             }
         });
     }
@@ -385,10 +434,24 @@ fn replace_extent(text: &str, first: &SyntaxNode, block: String) -> TextEdit {
             },
         }
     } else {
+        let tail = block_tail(
+            text,
+            &block,
+            ext.end,
+            &syntax::line_indent(text, ext.start),
+            "",
+        );
+        // After a line break the old spacing before the following text is redundant.
+        let mut end = ext.end;
+        if !tail.is_empty() {
+            while matches!(text.as_bytes().get(end), Some(b' ' | b'\t')) {
+                end += 1;
+            }
+        }
         TextEdit {
             start: ext.start,
-            end: ext.end,
-            text: block.trim_start().to_string(),
+            end,
+            text: format!("{}{tail}", block.trim_start()),
         }
     }
 }
@@ -676,13 +739,7 @@ impl Document {
                 for l in &loose {
                     blocks.push(format!("{indent}{l}"));
                 }
-                let loose_last = !loose.is_empty();
-                let mut edit = replace_extent(&self.text, &wrapper, blocks.join("\n"));
-                // A comment must not swallow code that follows it on the same line.
-                let after = &self.text[ext.end..line_end(&self.text, ext.end)];
-                if !ext.line_mode && loose_last && !after.trim().is_empty() {
-                    edit.text.push_str(&format!("\n{indent}"));
-                }
+                let edit = replace_extent(&self.text, &wrapper, blocks.join("\n"));
                 (apply_edits(&self.text, vec![edit])?, Some(parent_path))
             }
         };
