@@ -238,6 +238,15 @@ impl LiveInstance {
         Some(Self::hit_for(&rect, start))
     }
 
+    /// Geometry of the edited component's root element (which has no source start of its own
+    /// that `geometry` could look up): the wrapper's single child, the use site of the
+    /// component. `Hit::start` is 0.
+    pub fn root_geometry(&self) -> Option<Hit> {
+        let used = kids(&self.root()).into_iter().next()?;
+        let rect = self.inst.element_positions(&used).into_iter().next()?;
+        Some(Self::hit_for(&rect, 0))
+    }
+
     /// Geometry of the first instance of the element starting at `start`.
     pub fn geometry(&self, start: u32) -> Option<Hit> {
         fn find(li: &LiveInstance, e: &ElementRc, start: u32) -> Option<Hit> {

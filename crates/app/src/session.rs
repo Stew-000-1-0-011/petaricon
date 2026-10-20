@@ -332,14 +332,59 @@ impl Session {
         }
     }
 
+    /// `(path, type, id)` of every element of the current component, in tree order.
+    fn shape(doc: &Document, component: &str) -> Vec<(ElementPath, String, Option<String>)> {
+        fn walk(n: &TreeNode, out: &mut Vec<(ElementPath, String, Option<String>)>) {
+            out.push((n.info.path.clone(), n.info.type_name.clone(), n.info.id.clone()));
+            for c in &n.children {
+                walk(c, out);
+            }
+        }
+        let mut out = Vec::new();
+        if let Some(t) = doc.tree(component) {
+            walk(&t, &mut out);
+        }
+        out
+    }
+
+    /// False when the preview is stale (the source does not compile) and the current
+    /// component's element tree differs from the one the preview was built from, so paths from
+    /// the preview would name other elements in the document.
+    fn preview_matches_doc(&self) -> bool {
+        if self.diagnostics.is_empty() {
+            return true;
+        }
+        let snapshot = self.snapshot.borrow();
+        snapshot.text() == self.doc.text()
+            || Self::shape(&snapshot, &self.component) == Self::shape(&self.doc, &self.component)
+    }
+
+    fn refuse_if_mismatch(&self) -> Result<(), SessionError> {
+        if self.preview_matches_doc() {
+            Ok(())
+        } else {
+            Err(SessionError::Compile(self.diagnostics.clone()))
+        }
+    }
+
     pub fn tap(&mut self, x: f32, y: f32) -> Option<ElementPath> {
+        if !self.preview_matches_doc() {
+            self.selection = None;
+            self.last_tap = None;
+            return None;
+        }
         let hits = self.live.borrow().as_ref()?.hits_at(x, y);
         let snapshot = self.snapshot.borrow();
-        let candidates: Vec<ElementPath> = hits
+        let mut candidates: Vec<ElementPath> = hits
             .iter()
             .filter_map(|h| snapshot.path_at_offset(h.start))
             .filter(|p| p.component == self.component)
             .collect();
+        // The component root is the last ancestor; hit testing itself never reports it.
+        let root = ElementPath { component: self.component.clone(), indices: vec![] };
+        if !candidates.is_empty() && !candidates.contains(&root) {
+            candidates.push(root);
+        }
         let near = self.last_tap.is_some_and(|(lx, ly)| {
             (lx - x).abs() <= TAP_THRESHOLD && (ly - y).abs() <= TAP_THRESHOLD
         });
@@ -370,6 +415,7 @@ impl Session {
             )
             .into());
         }
+        self.refuse_if_mismatch()?;
         let mut parent = path.clone();
         parent.indices.pop();
         let parent_info = self
@@ -543,6 +589,7 @@ impl Session {
     /// Sets (or, for an empty value, removes) a property of the selection.
     pub fn set_property(&mut self, name: &str, value: &str) -> Result<(), SessionError> {
         let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
+        self.refuse_if_mismatch()?;
         // Only the emptiness check and non-text values are trimmed: `"Hi "` keeps its space.
         let kind = prop_kind(name);
         let value = if kind == PropKind::Text && !value.trim().is_empty() {
@@ -672,17 +719,32 @@ impl Session {
     }
 
     fn local_rect_of(&self, path: &ElementPath) -> Option<(f32, f32, f32, f32)> {
-        let info = self.snapshot.borrow().element(path)?;
-        let hit = self.live.borrow().as_ref()?.geometry(info.start)?;
+        let hit = self.hit_of(path)?;
         Some((hit.local.x, hit.local.y, hit.local.w, hit.local.h))
     }
 
     /// First 8px-grid position (x first, then y) where an assumed 40x40 element fits inside
     /// `parent` without overlapping or touching its existing children.
-    fn free_position(&self, parent: &ElementPath, child_count: usize) -> (i32, i32) {
+    ///
+    /// `hint` is the top-left of the visible design area; the scan starts there (converted to
+    /// the parent's coordinates, clamped inside it) and wraps to the container's start. A full
+    /// container cascades: +8px from its last child.
+    fn free_position(
+        &self,
+        parent: &ElementPath,
+        child_count: usize,
+        hint: Option<(f32, f32)>,
+    ) -> (i32, i32) {
+        let origin = (PLACE_STEP as i32, PLACE_STEP as i32);
         let Some((_, _, pw, ph)) = self.local_rect_of(parent) else {
-            return (PLACE_STEP as i32, PLACE_STEP as i32);
+            return origin;
         };
+        let (mut sx, mut sy) = (PLACE_STEP, PLACE_STEP);
+        if let (Some((hx, hy)), Some(h)) = (hint, self.hit_of(parent)) {
+            let snap8 = |v: f32| (v / PLACE_STEP).round() * PLACE_STEP;
+            sx = snap8(hx - h.rect.x).clamp(PLACE_STEP, (pw - NEW_SIZE).max(PLACE_STEP));
+            sy = snap8(hy - h.rect.y).clamp(PLACE_STEP, (ph - NEW_SIZE).max(PLACE_STEP));
+        }
         let kids: Vec<_> = (0..child_count)
             .filter_map(|i| {
                 let mut p = parent.clone();
@@ -690,21 +752,31 @@ impl Session {
                 self.local_rect_of(&p)
             })
             .collect();
-        let mut y = PLACE_STEP;
-        while y + NEW_SIZE <= ph {
-            let mut x = PLACE_STEP;
-            while x + NEW_SIZE <= pw {
-                let overlaps = kids.iter().any(|&(kx, ky, kw, kh)| {
-                    x <= kx + kw && kx <= x + NEW_SIZE && y <= ky + kh && ky <= y + NEW_SIZE
-                });
-                if !overlaps {
-                    return (x as i32, y as i32);
+        let free = |x: f32, y: f32| {
+            !kids.iter().any(|&(kx, ky, kw, kh)| {
+                x <= kx + kw && kx <= x + NEW_SIZE && y <= ky + kh && ky <= y + NEW_SIZE
+            })
+        };
+        // First the part from the hint onwards, then the whole container from its start.
+        for (from_x, from_y) in [(sx, sy), (PLACE_STEP, PLACE_STEP)] {
+            let mut y = from_y;
+            while y + NEW_SIZE <= ph {
+                let mut x = if y == from_y { from_x } else { PLACE_STEP };
+                while x + NEW_SIZE <= pw {
+                    if free(x, y) {
+                        return (x as i32, y as i32);
+                    }
+                    x += PLACE_STEP;
                 }
-                x += PLACE_STEP;
+                y += PLACE_STEP;
             }
-            y += PLACE_STEP;
         }
-        (PLACE_STEP as i32, PLACE_STEP as i32)
+        match kids.last() {
+            Some(&(kx, ky, ..)) => {
+                ((kx + PLACE_STEP).max(PLACE_STEP) as i32, (ky + PLACE_STEP).max(PLACE_STEP) as i32)
+            }
+            None => origin,
+        }
     }
 
     fn refuse_if_stale(&self) -> Result<(), SessionError> {
@@ -717,7 +789,12 @@ impl Session {
 
     /// Inserts `name` at the end of `parent`, adding the `std-widgets.slint` import when needed,
     /// as a single history step. Selects the new element.
-    fn insert_part(&mut self, parent: ElementPath, name: &str) -> Result<(), SessionError> {
+    fn insert_part(
+        &mut self,
+        parent: ElementPath,
+        name: &str,
+        hint: Option<(f32, f32)>,
+    ) -> Result<(), SessionError> {
         self.refuse_if_stale()?;
         let parent_info = self
             .doc
@@ -725,7 +802,7 @@ impl Session {
             .ok_or_else(|| EditError::ElementNotFound(parent.clone()))?;
         let mut props = Vec::new();
         if !matches!(parent_info.kind, ElementKind::Layout(_)) {
-            let (x, y) = self.free_position(&parent, parent_info.child_count);
+            let (x, y) = self.free_position(&parent, parent_info.child_count, hint);
             props.push(format!("x: {x}px;"));
             props.push(format!("y: {y}px;"));
         }
@@ -764,7 +841,13 @@ impl Session {
 
     /// Adds a part: into the selection when it is a container, else into its parent (the
     /// component root when nothing is selected).
-    pub fn add_from_palette(&mut self, name: &str) -> Result<(), SessionError> {
+    ///
+    /// `hint` is the top-left of the visible design area, where the part is preferably placed.
+    pub fn add_from_palette(
+        &mut self,
+        name: &str,
+        hint: Option<(f32, f32)>,
+    ) -> Result<(), SessionError> {
         self.refuse_if_stale()?;
         let target = match &self.selection {
             None => ElementPath { component: self.component.clone(), indices: vec![] },
@@ -782,7 +865,7 @@ impl Session {
                 }
             }
         };
-        self.insert_part(target, name)
+        self.insert_part(target, name, hint)
     }
 
     fn child_path(parent: &ElementPath, i: usize) -> ElementPath {
@@ -793,6 +876,9 @@ impl Session {
 
     /// Geometry in the live preview of the element at `path`.
     fn hit_of(&self, path: &ElementPath) -> Option<Hit> {
+        if path.indices.is_empty() {
+            return self.live.borrow().as_ref()?.root_geometry();
+        }
         let info = self.snapshot.borrow().element(path)?;
         self.live.borrow().as_ref()?.geometry(info.start)
     }
@@ -801,6 +887,7 @@ impl Session {
     /// The positions come from the live preview; nothing changes when any is missing.
     pub fn tidy_selection(&mut self) -> Result<Vec<tidy::Warning>, SessionError> {
         let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
+        self.refuse_if_mismatch()?;
         let info = self
             .doc
             .element(&path)
@@ -832,6 +919,9 @@ impl Session {
     /// vertical layout, else the selected container's only horizontal/vertical layout child
     /// (other children may exist). A container with several such layouts is ambiguous: `None`.
     fn guide_layout(&self) -> Option<(ElementPath, ElementInfo, LayoutKind)> {
+        if !self.preview_matches_doc() {
+            return None;
+        }
         let path = self.selection.clone()?;
         let info = self.doc.element(&path)?;
         let stack = |i: &ElementInfo| match i.kind {
@@ -862,6 +952,7 @@ impl Session {
     /// their on-screen positions rounded to the grid. `NotALayout` when there is none.
     pub fn untidy_selection(&mut self) -> Result<(), SessionError> {
         self.selection.as_ref().ok_or(SessionError::NoSelection)?;
+        self.refuse_if_mismatch()?;
         let (layout, layout_info, _) = self.guide_layout().ok_or(SessionError::NotALayout)?;
         let mut parent = layout.clone();
         parent.indices.pop();
@@ -889,6 +980,7 @@ impl Session {
 
     /// Edits a property of the guided layout, selecting the layout first when needed.
     pub fn set_guide_property(&mut self, name: &str, value: &str) -> Result<(), SessionError> {
+        self.refuse_if_mismatch()?;
         let (path, ..) = self.guide_layout().ok_or(SessionError::NotALayout)?;
         let previous = self.selection.replace(path);
         let r = self.set_property(name, value);
@@ -906,7 +998,7 @@ impl Session {
         };
         let Some((&index, parent_indices)) = path.indices.split_last() else {
             return match action {
-                TreeAction::NewContainer => self.insert_part(path.clone(), "Rectangle"),
+                TreeAction::NewContainer => self.insert_part(path.clone(), "Rectangle", None),
                 _ => Err(root_err()),
             };
         };
@@ -968,24 +1060,80 @@ impl Session {
                 self.revalidate();
                 Ok(())
             }
-            TreeAction::NewContainer => self.insert_part(parent, "Rectangle"),
+            TreeAction::NewContainer => self.insert_part(parent, "Rectangle", None),
         }
     }
+}
+
+/// A copy of `text` with every comment turned into spaces (newlines kept), byte for byte the
+/// same length, so offsets found in it are valid in `text`. String literals are left alone.
+fn mask_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.char_indices().peekable();
+    let blank = |out: &mut String, c: char| {
+        if c == '\n' {
+            out.push('\n');
+        } else {
+            out.extend(std::iter::repeat_n(' ', c.len_utf8()));
+        }
+    };
+    while let Some((_, c)) = chars.next() {
+        match (c, chars.peek().map(|&(_, n)| n)) {
+            ('/', Some('/')) => {
+                blank(&mut out, c);
+                while let Some(&(_, n)) = chars.peek() {
+                    if n == '\n' {
+                        break;
+                    }
+                    blank(&mut out, n);
+                    chars.next();
+                }
+            }
+            ('/', Some('*')) => {
+                blank(&mut out, c);
+                blank(&mut out, '*');
+                chars.next();
+                let mut prev = '\0';
+                for (_, n) in chars.by_ref() {
+                    blank(&mut out, n);
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+            }
+            ('"', _) => {
+                out.push(c);
+                let mut escaped = false;
+                for (_, n) in chars.by_ref() {
+                    out.push(n);
+                    if n == '"' && !escaped {
+                        break;
+                    }
+                    escaped = n == '\\' && !escaped;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Adds `name` to the `import { ... } from "std-widgets.slint";` line, creating the line at the
 /// top of the file when there is none. Everything else in the file stays byte-identical:
 /// the name is inserted right after the last entry, matching a multi-line layout and a
 /// trailing comma when the import uses them. An entry already imported (also under an alias,
-/// `Button as B`) is left alone.
+/// `Button as B`) is left alone. Comments are ignored when looking for the import.
 fn with_std_import(text: &str, name: &str) -> String {
     const MODULE: &str = "\"std-widgets.slint\"";
-    if let Some(from) = text.find(MODULE)
-        && let Some(close) = text[..from].rfind('}')
-        && let Some(open) = text[..close].rfind('{')
-        && text[..open].trim_end().ends_with("import")
-    {
-        let names = &text[open + 1..close];
+    let masked = mask_comments(text);
+    let import = masked.match_indices(MODULE).find_map(|(from, _)| {
+        let close = masked[..from].rfind('}')?;
+        let open = masked[..close].rfind('{')?;
+        masked[..open].trim_end().ends_with("import").then_some((open, close))
+    });
+    if let Some((open, close)) = import {
+        let names = &masked[open + 1..close];
         if names.split(',').any(|n| n.split_whitespace().next() == Some(name)) {
             return text.to_string();
         }
@@ -994,7 +1142,8 @@ fn with_std_import(text: &str, name: &str) -> String {
             None => (close, format!("{name} ")),
             Some(last) => {
                 let trailing_comma = names[last..].starts_with(',');
-                let at = open + 1 + last + 1;
+                let last_len = names[last..].chars().next().map_or(1, char::len_utf8);
+                let at = open + 1 + last + last_len;
                 let insert = if names.contains('\n') {
                     let line_start = names[..last].rfind('\n').map_or(0, |n| n + 1);
                     let line = &names[line_start..];

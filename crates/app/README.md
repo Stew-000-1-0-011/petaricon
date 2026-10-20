@@ -34,7 +34,7 @@ cd crates/app
 cargo apk build --release --lib --target aarch64-linux-android
 ```
 
-出力は `target/release/apk/app.apk` です。release ビルドは `~/.android/debug.keystore`(パスワード `android`)で署名します(`crates/app/Cargo.toml` の `package.metadata.android.signing.release`)。キーストアがなければ次で作ります。
+出力は `target/release/apk/app.apk` です。release ビルドは `~/.android/debug.keystore`(パスワード `android`)で署名します(`crates/app/Cargo.toml` の `package.metadata.android.signing.release`)。署名のパスは `Cargo.toml` に絶対パス(`/root/.android/debug.keystore`)で書かれているので、別の環境でビルドするときは自分のキーストアのパスに書き換えてください。キーストアがなければ次で作ります。
 
 ```sh
 keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey \
@@ -58,7 +58,7 @@ APK ファイルをスマホへコピーして、ファイルアプリから開�
 - Android: `Android/data/dev.petaricon.editor/files/projects/<プロジェクト名>/*.slint`。権限は不要です。PC と USB 接続して(ファイル転送モード)、この場所を開くと `.slint` を読み書きできます。
 - PC: 起動引数で指定したフォルダ(省略時 `./projects`)。
 
-保存のたびに直前の版を `<ファイル名>.slint.bak` として 1 世代残します。未保存の内容は数秒ごとに `<プロジェクト>/.recovery/<ファイル名>` へ書き出され、次回起動時に復元するか確認されます。アプリがバックグラウンドに回ったときにも自動で保存します。
+保存のたびに直前の版を `<ファイル名>.slint.bak` として 1 世代残します。未保存の内容は数秒ごとに `<プロジェクト>/.recovery/<ファイル名>` へ書き出され、次回起動時に復元するか確認されます。アプリがバックグラウンドに回ったときにも自動で保存します。起動時は、復元用コピーが残っているファイルを(どのプロジェクトでも)最初に開き、なければ最後に開いていたファイルを開きます(保存先フォルダの `.last-open`)。ウィンドウを閉じるときに保存できなかった場合は、ウィンドウを閉じずにエラーを表示し、復元用コピーを書き出します。
 
 ## ログ
 

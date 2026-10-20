@@ -32,6 +32,9 @@ export component Editor inherits Window {
     in property <string> source-title;
     in-out property <string> source-text;
     in-out property <int> panel-tab: 0;
+    // The canvas pan, read by the glue to place new parts in the visible area.
+    in-out property <length> canvas-pan-x: 8px;
+    in-out property <length> canvas-pan-y: 8px;
     in property <bool> has-guides;
     in property <length> g-x;
     in property <length> g-y;
@@ -153,6 +156,8 @@ export component Editor inherits Window {
         sel-w: root.sel-w;
         sel-h: root.sel-h;
         zoom: root.zoom-level;
+        pan-x <=> root.canvas-pan-x;
+        pan-y <=> root.canvas-pan-y;
         has-guides: root.has-guides;
         guides-rev: root.guides-rev;
         g-x: root.g-x;

@@ -83,3 +83,12 @@ fn used_subcomponent_contents_are_hit() {
     let starts: Vec<u32> = inst.hits_at(55., 16.).iter().map(|h| h.start).collect();
     assert_eq!(starts, vec![text_at, chip_use]);
 }
+
+#[test]
+fn root_geometry_is_the_component_root() {
+    i_slint_backend_testing::init_no_event_loop();
+    let c = compile(CARD, Path::new("/t/card.slint"), "Card").unwrap();
+    let inst = c.instantiate(200., 100.);
+    let root = inst.root_geometry().expect("root geometry");
+    assert_eq!((root.rect.x, root.rect.y, root.rect.w, root.rect.h), (0., 0., 200., 100.));
+}

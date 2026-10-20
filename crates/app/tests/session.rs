@@ -139,7 +139,26 @@ fn tap_cycle_wraps_to_first() {
     let mut s = session();
     assert_eq!(s.tap(25., 25.), Some(path(&[0, 0])));
     assert_eq!(s.tap(25., 25.), Some(path(&[0])));
+    assert_eq!(s.tap(25., 25.), Some(path(&[])));
     assert_eq!(s.tap(25., 25.), Some(path(&[0, 0])));
+}
+
+#[test]
+fn root_reached_by_tapping_again_cannot_be_moved() {
+    let mut s = session();
+    s.tap(25., 25.);
+    s.tap(25., 25.);
+    assert_eq!(s.tap(25., 25.), Some(path(&[])));
+    let before = s.doc().text().to_string();
+    assert!(matches!(
+        s.move_selection(4., 4.),
+        Err(SessionError::Edit(slint_doc::EditError::InvalidTarget(_)))
+    ));
+    assert!(matches!(
+        s.resize_selection(Corner::BottomRight, 4., 4.),
+        Err(SessionError::Edit(slint_doc::EditError::InvalidTarget(_)))
+    ));
+    assert_eq!(s.doc().text(), before);
 }
 
 #[test]
@@ -263,7 +282,7 @@ fn select(s: &mut Session, p: &[usize]) {
 fn palette_adds_into_free_container_without_overlap() {
     let mut s = palette_session(PALETTE_SRC);
     select(&mut s, &[0]);
-    s.add_from_palette("Button").unwrap();
+    s.add_from_palette("Button", None).unwrap();
     let t = s.doc().text();
     assert!(
         t.starts_with("import { Button } from \"std-widgets.slint\";\n"),
@@ -285,14 +304,14 @@ fn palette_adds_std_widget_to_existing_import() {
     let src = format!("import {{ LineEdit, ListView }} from \"std-widgets.slint\";\n{PALETTE_SRC}");
     let mut s = palette_session(&src);
     select(&mut s, &[0]);
-    s.add_from_palette("Slider").unwrap();
+    s.add_from_palette("Slider", None).unwrap();
     let t = s.doc().text();
     assert!(
         t.starts_with("import { LineEdit, ListView, Slider } from \"std-widgets.slint\";\n"),
         "{t}"
     );
     // Already imported: no duplicate.
-    s.add_from_palette("Slider").unwrap();
+    s.add_from_palette("Slider", None).unwrap();
     assert_eq!(s.doc().text().matches("Slider }").count(), 1);
 }
 
@@ -300,7 +319,7 @@ fn palette_adds_std_widget_to_existing_import() {
 fn palette_into_non_container_goes_to_parent_and_layout_has_no_xy() {
     let mut s = palette_session(PALETTE_SRC);
     select(&mut s, &[1, 0]); // Text in the VerticalLayout
-    s.add_from_palette("Rectangle").unwrap();
+    s.add_from_palette("Rectangle", None).unwrap();
     assert_eq!(s.selection(), Some(&path(&[1, 2])));
     let el = s.doc().element(&path(&[1, 2])).unwrap();
     assert!(el.bindings.iter().all(|b| b.name != "x" && b.name != "y"));
@@ -322,7 +341,7 @@ fn palette_refused_while_stale() {
     s.replace_text(format!("{PALETTE_SRC}\nexport component Broken {{ Text {{ text: 1 +; }} }}\n"));
     assert!(!s.rebuild_standalone(300., 300.));
     let before = s.doc().text().to_string();
-    assert!(matches!(s.add_from_palette("Button"), Err(SessionError::Compile(_))));
+    assert!(matches!(s.add_from_palette("Button", None), Err(SessionError::Compile(_))));
     assert_eq!(s.doc().text(), before);
 }
 
@@ -380,7 +399,7 @@ fn add_widget(header: &str, name: &str) -> (String, String) {
     // the text edit does not need geometry.
     let mut s = Session::new(Document::new(PathBuf::from("/t/main.slint"), src.clone()));
     select(&mut s, &[0]);
-    s.add_from_palette(name).unwrap();
+    s.add_from_palette(name, None).unwrap();
     (src, s.doc().text().to_string())
 }
 
@@ -750,4 +769,102 @@ fn extract_then_add_declarations_and_name_errors() {
     assert!(s.add_declaration("Card", DeclKind::InProperty, "string", "a b").is_err());
     assert!(s.add_declaration("Card", DeclKind::InProperty, "nope", "x").is_err());
     assert!(s.rebuild_standalone(300., 300.), "{:?}", s.diagnostics());
+}
+
+// ---- palette placement hint ----
+
+fn local_xy(s: &Session, p: &[usize]) -> (String, String) {
+    let el = s.doc().element(&path(p)).unwrap();
+    let b = |n: &str| el.bindings.iter().find(|b| b.name == n).map(|b| b.expr.clone()).unwrap();
+    (b("x"), b("y"))
+}
+
+#[test]
+fn palette_hint_places_near_the_visible_origin() {
+    let mut s = palette_session(PALETTE_SRC);
+    select(&mut s, &[0]); // box: 200x200 at (50, 50) in the 300x300 root
+    s.add_from_palette("Rectangle", Some((146., 146.))).unwrap();
+    assert_eq!(local_xy(&s, &[0, 1]), ("96px".into(), "96px".into()));
+}
+
+#[test]
+fn palette_hint_is_converted_to_the_parents_coordinates_and_clamped() {
+    let mut s = palette_session(PALETTE_SRC);
+    select(&mut s, &[0]);
+    // Left/above the container: clamped to 8.
+    s.add_from_palette("Rectangle", Some((-50., -50.))).unwrap();
+    assert_eq!(local_xy(&s, &[0, 1]), ("56px".into(), "8px".into()), "overlaps (8,8) child, scans on");
+    // Far right/below: clamped inside the 200x200 container.
+    select(&mut s, &[0]);
+    s.add_from_palette("Rectangle", Some((900., 900.))).unwrap();
+    assert_eq!(local_xy(&s, &[0, 2]), ("160px".into(), "160px".into()));
+}
+
+#[test]
+fn palette_full_container_cascades_instead_of_stacking_at_8_8() {
+    let src = "export component Main inherits Rectangle {\n    width: 300px;\n    height: 300px;\n    Rectangle {\n        x: 4px;\n        y: 4px;\n        width: 300px;\n        height: 300px;\n    }\n}\n";
+    let mut s = palette_session(src);
+    s.add_from_palette("Rectangle", None).unwrap();
+    assert_eq!(local_xy(&s, &[1]), ("12px".into(), "12px".into()));
+    assert!(s.rebuild_standalone(300., 300.));
+    s.select_path(path(&[]));
+    s.add_from_palette("Rectangle", None).unwrap();
+    assert_eq!(local_xy(&s, &[2]), ("20px".into(), "20px".into()));
+}
+
+// ---- stale preview after source edits ----
+
+#[test]
+fn source_edit_adding_a_broken_sibling_does_not_retarget_edits() {
+    let mut s = session();
+    // A new first child shifts every path; the source no longer compiles.
+    let edited = SRC.replacen(
+        "    a := Rectangle {",
+        "    Rectangle { width: 5px; foo: 1 +; }\n    a := Rectangle {",
+        1,
+    );
+    s.replace_text(edited.clone());
+    assert!(!s.rebuild_standalone(300., 300.));
+    assert_eq!(s.tap(60., 60.), None);
+    assert_eq!(s.selection(), None);
+    assert!(matches!(s.move_selection(8., 8.), Err(SessionError::NoSelection)));
+    // Selecting through the tree must not let geometry or property edits through either.
+    s.select_path(path(&[0]));
+    assert!(matches!(s.move_selection(8., 8.), Err(SessionError::Compile(_))));
+    assert!(matches!(
+        s.resize_selection(Corner::BottomRight, 8., 8.),
+        Err(SessionError::Compile(_))
+    ));
+    assert!(matches!(s.set_property("x", "30"), Err(SessionError::Compile(_))));
+    assert!(matches!(s.set_guide_property("spacing", "4"), Err(SessionError::Compile(_))));
+    assert!(matches!(s.untidy_selection(), Err(SessionError::Compile(_))));
+    assert!(matches!(s.tidy_selection(), Err(SessionError::Compile(_))));
+    assert_eq!(s.doc().text(), edited);
+}
+
+// ---- import edge cases ----
+
+#[test]
+fn import_with_multibyte_comment_before_closing_brace() {
+    let h = "import { Button // ボタン\n} from \"std-widgets.slint\";\n";
+    let (src, out) = add_widget(h, "LineEdit");
+    let want = src.replacen("Button", "Button,\n LineEdit", 1);
+    assert_eq!(without_new_element(&out), want);
+}
+
+#[test]
+fn import_with_multibyte_block_comment_after_trailing_comma() {
+    let h = "import { Button, /* 日本語 */ } from \"std-widgets.slint\";\n";
+    let (_, out) = add_widget(h, "LineEdit");
+    assert!(out.contains("LineEdit"), "{out}");
+}
+
+#[test]
+fn comment_mentioning_std_widgets_is_not_an_import() {
+    let h = "// uses \"std-widgets.slint\" later\nimport { X } from \"other.slint\"; /* import { Y } from \"std-widgets.slint\"; */\n";
+    let (src, out) = add_widget(h, "Button");
+    assert_eq!(
+        without_new_element(&out),
+        format!("import {{ Button }} from \"std-widgets.slint\";\n{src}")
+    );
 }

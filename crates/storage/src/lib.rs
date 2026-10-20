@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 
 const MAIN_TEMPLATE: &str = "export component Main inherits Window {\n    preferred-width: 360px;\n    preferred-height: 640px;\n}\n";
 
+/// Remembers the last open project and file; lives in the store root (dot names are never
+/// listed as projects).
+const LAST_OPEN: &str = ".last-open";
+
 pub trait ProjectStore {
     fn projects(&self) -> io::Result<Vec<String>>;
     fn create_project(&self, name: &str) -> io::Result<()>;
@@ -19,6 +23,13 @@ pub trait ProjectStore {
     /// Returns the recovery copy, if any. Does not delete it.
     fn take_recovery(&self, project: &str, file: &str) -> io::Result<Option<String>>;
     fn clear_recovery(&self, project: &str, file: &str) -> io::Result<()>;
+    /// The project and file that were open last, if remembered.
+    fn last_open(&self) -> io::Result<Option<(String, String)>> {
+        Ok(None)
+    }
+    fn set_last_open(&self, _project: &str, _file: &str) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub struct LocalStore {
@@ -124,7 +135,9 @@ impl ProjectStore for LocalStore {
             fs::rename(&path, path.with_file_name(format!("{file}.bak")))?;
         }
         fs::rename(&tmp, &path)?;
-        remove_if_exists(&recovery)
+        // The save succeeded; a stale recovery copy is only an inconvenience.
+        let _ = remove_if_exists(&recovery);
+        Ok(())
     }
 
     fn write_recovery(&self, project: &str, file: &str, text: &str) -> io::Result<()> {
@@ -145,6 +158,28 @@ impl ProjectStore for LocalStore {
 
     fn clear_recovery(&self, project: &str, file: &str) -> io::Result<()> {
         remove_if_exists(&self.recovery_path(project, file)?)
+    }
+
+    fn last_open(&self) -> io::Result<Option<(String, String)>> {
+        let text = match fs::read_to_string(self.root.join(LAST_OPEN)) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let mut lines = text.lines();
+        let (Some(p), Some(f)) = (lines.next(), lines.next()) else {
+            return Ok(None);
+        };
+        if check_name(p).is_err() || check_name(f).is_err() {
+            return Ok(None);
+        }
+        Ok(Some((p.to_string(), f.to_string())))
+    }
+
+    fn set_last_open(&self, project: &str, file: &str) -> io::Result<()> {
+        check_name(project)?;
+        check_name(file)?;
+        fs::write(self.root.join(LAST_OPEN), format!("{project}\n{file}\n"))
     }
 }
 
@@ -202,6 +237,29 @@ mod tests {
         s.clear_recovery("p", "main.slint").unwrap();
         assert_eq!(s.take_recovery("p", "main.slint").unwrap(), None);
         s.clear_recovery("p", "main.slint").unwrap();
+    }
+
+    #[test]
+    fn write_succeeds_even_if_recovery_cleanup_fails() {
+        let (d, s) = store();
+        s.create_project("p").unwrap();
+        // A directory where the recovery file should be makes remove_file fail.
+        std::fs::create_dir_all(d.path().join("projects/p/.recovery/main.slint")).unwrap();
+        s.write("p", "main.slint", "saved").unwrap();
+        assert_eq!(s.read("p", "main.slint").unwrap(), "saved");
+    }
+
+    #[test]
+    fn last_open_roundtrip() {
+        let (d, s) = store();
+        assert_eq!(s.last_open().unwrap(), None);
+        s.create_project("p").unwrap();
+        s.set_last_open("p", "main.slint").unwrap();
+        assert_eq!(s.last_open().unwrap(), Some(("p".into(), "main.slint".into())));
+        assert_eq!(s.projects().unwrap(), vec!["p"]);
+        assert!(s.set_last_open("../x", "main.slint").is_err());
+        std::fs::write(d.path().join("projects/.last-open"), "../evil\nx\n").unwrap();
+        assert_eq!(s.last_open().unwrap(), None);
     }
 
     #[test]

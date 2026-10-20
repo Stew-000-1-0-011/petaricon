@@ -202,8 +202,8 @@ fn recovery_prompt_no_clears_copy_and_keeps_text() {
     let (dir, store) = two_files();
     store.write_recovery("default", "other.slint", "// draft\n").unwrap();
     let editor = glue_editor(store);
-    assert!(!editor.get_recovery_open());
-    editor.invoke_open("default".into(), "other.slint".into());
+    // The file with a pending recovery copy is opened first, so the prompt shows at startup.
+    assert_eq!(editor.get_current_file().as_str(), "other.slint");
     assert!(editor.get_recovery_open());
     editor.invoke_recovery_answered(false);
     assert!(!editor.get_recovery_open());
@@ -219,7 +219,7 @@ fn recovery_prompt_yes_replaces_text_and_marks_dirty_without_touching_file() {
     let draft = SRC.replace("300px", "250px");
     store.write_recovery("default", "other.slint", &draft).unwrap();
     let editor = glue_editor(store);
-    editor.invoke_open("default".into(), "other.slint".into());
+    assert_eq!(editor.get_current_file().as_str(), "other.slint");
     assert!(editor.get_recovery_open());
     editor.invoke_recovery_answered(true);
     assert!(!editor.get_recovery_open());
@@ -227,4 +227,104 @@ fn recovery_prompt_yes_replaces_text_and_marks_dirty_without_touching_file() {
     assert_eq!(read_back(&dir, "other.slint"), SRC, "file untouched until saved");
     editor.invoke_save();
     assert_eq!(read_back(&dir, "other.slint"), draft);
+}
+
+#[test]
+fn startup_opens_the_file_with_a_recovery_copy_in_any_project() {
+    use app::glue::startup_target;
+    let (dir, store) = two_files();
+    store.create_project("aaa").unwrap();
+    store.write("aaa", "z.slint", SRC).unwrap();
+    store.write_recovery("aaa", "z.slint", "// draft\n").unwrap();
+    assert_eq!(startup_target(&store), Ok(("aaa".into(), "z.slint".into())));
+    // A copy equal to the file is not a recovery.
+    store.write_recovery("aaa", "z.slint", SRC).unwrap();
+    assert_eq!(startup_target(&store), Ok(("default".into(), "main.slint".into())));
+    drop(dir);
+}
+
+#[test]
+fn startup_reopens_the_last_open_file_and_falls_back_when_it_is_gone() {
+    use app::glue::startup_target;
+    let (_d, store) = two_files();
+    assert_eq!(startup_target(&store), Ok(("default".into(), "main.slint".into())));
+    store.set_last_open("default", "other.slint").unwrap();
+    assert_eq!(startup_target(&store), Ok(("default".into(), "other.slint".into())));
+    store.set_last_open("default", "gone.slint").unwrap();
+    assert_eq!(startup_target(&store), Ok(("default".into(), "main.slint".into())));
+    // Recovery wins over last-open.
+    store.set_last_open("default", "other.slint").unwrap();
+    store.write_recovery("default", "main.slint", "// draft\n").unwrap();
+    assert_eq!(startup_target(&store), Ok(("default".into(), "main.slint".into())));
+}
+
+#[test]
+fn opening_a_file_remembers_it_for_next_start() {
+    let (dir, store) = two_files();
+    let editor = glue_editor(store);
+    editor.invoke_open("default".into(), "other.slint".into());
+    let s = LocalStore::new(dir.path().to_path_buf()).unwrap();
+    assert_eq!(s.last_open().unwrap(), Some(("default".into(), "other.slint".into())));
+}
+
+#[test]
+fn save_without_changes_says_no_changes() {
+    let (_d, store) = two_files();
+    let editor = glue_editor(store);
+    editor.invoke_save();
+    assert_eq!(editor.get_message().as_str(), "No changes");
+    editor.invoke_tapped(60., 60.);
+    editor.invoke_drag_finished(40., 40.);
+    editor.invoke_save();
+    assert_eq!(editor.get_message().as_str(), "Saved");
+}
+
+#[test]
+fn failed_save_writes_a_recovery_copy() {
+    use app::glue::save_or_recover;
+    let dir = tempfile::tempdir().unwrap();
+    let inner = LocalStore::new(dir.path().to_path_buf()).unwrap();
+    inner.create_project("p").unwrap();
+    inner.write("p", "main.slint", SRC).unwrap();
+    let fail = Rc::new(Cell::new(true));
+    let store = Flaky { inner, fail_writes: fail };
+    let mut s = session(SRC);
+    s.replace_text(format!("{SRC}// edited\n"));
+    let r = save_or_recover(&store, "p", "main.slint", &mut s, true);
+    assert!(r.unwrap_err().contains("Save failed"));
+    assert!(s.doc().is_dirty());
+    assert_eq!(
+        store.take_recovery("p", "main.slint").unwrap().as_deref(),
+        Some(format!("{SRC}// edited\n").as_str())
+    );
+    assert_eq!(store.read("p", "main.slint").unwrap(), SRC);
+}
+
+#[test]
+fn closing_with_a_failing_save_keeps_the_window_and_shows_the_error() {
+    use slint::platform::WindowEvent;
+    i_slint_backend_testing::init_no_event_loop();
+    let dir = tempfile::tempdir().unwrap();
+    let inner = LocalStore::new(dir.path().to_path_buf()).unwrap();
+    inner.create_project("default").unwrap();
+    inner.write("default", "main.slint", SRC).unwrap();
+    let fail = Rc::new(Cell::new(false));
+    let editor = app::Editor::new().unwrap();
+    app::glue::start(&editor, Box::new(Flaky { inner, fail_writes: fail.clone() })).unwrap();
+    editor.window().set_size(slint::LogicalSize::new(480., 800.));
+    editor.show().unwrap();
+    slint::platform::update_timers_and_animations();
+    editor.invoke_tapped(60., 60.);
+    editor.invoke_drag_finished(40., 40.);
+    assert!(editor.get_dirty());
+    fail.set(true);
+    editor.window().dispatch_event(WindowEvent::CloseRequested);
+    assert!(editor.window().is_visible(), "window must stay open");
+    assert!(editor.get_error_text().contains("Save failed"));
+    let s = LocalStore::new(dir.path().to_path_buf()).unwrap();
+    assert!(s.take_recovery("default", "main.slint").unwrap().is_some());
+    // Once saving works, closing hides the window.
+    fail.set(false);
+    editor.window().dispatch_event(WindowEvent::CloseRequested);
+    assert!(!editor.window().is_visible());
 }

@@ -22,16 +22,15 @@ const RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const TOAST_TIME: Duration = Duration::from_secs(3);
 
 thread_local! {
-    static SAVE_HOOK: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
+    static SAVE_HOOK: RefCell<Option<Rc<dyn Fn() -> bool>>> = const { RefCell::new(None) };
 }
 
 /// Saves the open file. Safe to call from platform callbacks on the UI thread (e.g. Android
-/// pause); does nothing before the editor has started.
-pub fn save_now() {
+/// pause); does nothing before the editor has started. Returns false when the document could
+/// not be saved (the error is shown and a recovery copy was attempted).
+pub fn save_now() -> bool {
     let hook = SAVE_HOOK.with(|h| h.borrow().clone());
-    if let Some(h) = hook {
-        h();
-    }
+    hook.is_none_or(|h| h())
 }
 
 fn to_model(items: Vec<String>) -> ModelRc<SharedString> {
@@ -74,6 +73,59 @@ pub fn save_if_dirty(
         .map_err(|e| format!("Save failed: {e}"))?;
     session.mark_saved();
     Ok(true)
+}
+
+/// Like `save_if_dirty`, but a failed write also forces a recovery copy of the current text,
+/// so closing the window after a failed save loses nothing.
+pub fn save_or_recover(
+    store: &dyn ProjectStore,
+    project: &str,
+    file: &str,
+    session: &mut Session,
+    loaded: bool,
+) -> Result<bool, String> {
+    let r = save_if_dirty(store, project, file, session, loaded);
+    if let Err(e) = &r
+        && loaded
+        && let Err(re) = store.write_recovery(project, file, session.doc().text())
+    {
+        return Err(format!("{e}; recovery copy not written: {re}"));
+    }
+    r
+}
+
+/// The project and file to open at startup: the first file that has a recovery copy
+/// differing from it (so the recovery prompt shows), else the last open file that still
+/// exists, else `default/main.slint` (or the first project and file). Creates the default
+/// project when there are none.
+pub fn startup_target(store: &dyn ProjectStore) -> Result<(String, String), String> {
+    let mut projects = store.projects().map_err(|e| e.to_string())?;
+    if projects.is_empty() {
+        store.create_project(DEFAULT_PROJECT).map_err(|e| e.to_string())?;
+        projects.push(DEFAULT_PROJECT.into());
+    }
+    for p in &projects {
+        for f in store.files(p).unwrap_or_default() {
+            if let Ok(text) = store.read(p, &f)
+                && let Ok(Some(_)) = pending_recovery(store, p, &f, &text)
+            {
+                return Ok((p.clone(), f));
+            }
+        }
+    }
+    if let Ok(Some((p, f))) = store.last_open()
+        && projects.contains(&p)
+        && store.files(&p).is_ok_and(|fs| fs.contains(&f))
+    {
+        return Ok((p, f));
+    }
+    let project = if projects.iter().any(|p| p == DEFAULT_PROJECT) {
+        DEFAULT_PROJECT.to_string()
+    } else {
+        projects[0].clone()
+    };
+    let file = Glue::pick_file(store, &project)?;
+    Ok((project, file))
 }
 
 /// One recovery-timer tick. A dirty, loaded document whose text differs from the last
@@ -468,6 +520,7 @@ impl Glue {
                 self.session = session;
                 self.loaded = true;
                 self.last_recovery = None;
+                let _ = self.store.set_last_open(project, file);
                 self.refresh_lists();
                 self.editor().set_has_selection(false);
                 self.rebuild();
@@ -482,7 +535,7 @@ impl Glue {
         self.flush_prop();
         let ed = self.editor();
         ed.set_message("".into());
-        let r = save_if_dirty(
+        let r = save_or_recover(
             &*self.store,
             &self.project,
             &self.file,
@@ -490,9 +543,11 @@ impl Glue {
             self.loaded,
         );
         let ok = match r {
-            Ok(_) => {
-                self.last_recovery = None;
-                ed.set_message("Saved".into());
+            Ok(written) => {
+                if written {
+                    self.last_recovery = None;
+                }
+                ed.set_message(if written { "Saved" } else { "No changes" }.into());
                 true
             }
             Err(e) => {
@@ -543,7 +598,12 @@ impl Glue {
     fn palette_picked(&mut self, name: &str) {
         self.flush_prop();
         self.editor().set_message("".into());
-        let r = self.session.add_from_palette(name);
+        let ed = self.editor();
+        let hint = (
+            -ed.get_canvas_pan_x() / self.zoom,
+            -ed.get_canvas_pan_y() / self.zoom,
+        );
+        let r = self.session.add_from_palette(name, Some(hint));
         self.after_edit(r);
     }
 
@@ -853,17 +913,7 @@ fn connect(editor: &Editor, glue: &Shared) {
 }
 
 pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint::PlatformError> {
-    let mut projects = store.projects().map_err(platform_err)?;
-    if projects.is_empty() {
-        store.create_project(DEFAULT_PROJECT).map_err(platform_err)?;
-        projects.push(DEFAULT_PROJECT.into());
-    }
-    let project = if projects.iter().any(|p| p == DEFAULT_PROJECT) {
-        DEFAULT_PROJECT.to_string()
-    } else {
-        projects[0].clone()
-    };
-    let file = Glue::pick_file(&*store, &project).map_err(platform_err)?;
+    let (project, file) = startup_target(&*store).map_err(platform_err)?;
 
     let mut load_error = None;
     let glue: Shared = Rc::new_cyclic(|me| {
@@ -901,6 +951,7 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
         g.refresh_lists();
         match load_error {
             None => {
+                let _ = g.store.set_last_open(&g.project, &g.file);
                 g.rebuild();
                 g.check_recovery();
             }
@@ -922,17 +973,20 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
     );
 
     let weak = Rc::downgrade(&glue);
-    let save: Rc<dyn Fn()> = Rc::new(move || {
-        if let Some(g) = weak.upgrade()
-            && let Ok(mut g) = g.try_borrow_mut()
-        {
-            g.save();
+    let save: Rc<dyn Fn() -> bool> = Rc::new(move || {
+        match weak.upgrade() {
+            Some(g) => g.try_borrow_mut().is_ok_and(|mut g| g.save()),
+            None => true,
         }
     });
     SAVE_HOOK.with(|h| *h.borrow_mut() = Some(save));
     editor.window().on_close_requested(|| {
-        save_now();
-        slint::CloseRequestResponse::HideWindow
+        // A failed save keeps the window (and the unsaved edits) open with the error shown.
+        if save_now() {
+            slint::CloseRequestResponse::HideWindow
+        } else {
+            slint::CloseRequestResponse::KeepWindowShown
+        }
     });
     Ok(())
 }
