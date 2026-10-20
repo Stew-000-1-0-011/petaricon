@@ -35,8 +35,12 @@ pub enum Corner {
     BottomRight,
 }
 
+/// Callers must call `rebuild()` after each successful edit: geometry (tap, selection, move,
+/// resize) comes from the last successful build, resolved against `snapshot`, the text that
+/// build compiled.
 pub struct Session {
     doc: Document,
+    snapshot: Document,
     component: String,
     live: Rc<RefCell<Option<LiveInstance>>>,
     selection: Option<ElementPath>,
@@ -62,7 +66,9 @@ impl Session {
             .or_else(|| comps.first())
             .map(|c| c.name.clone())
             .unwrap_or_default();
+        let snapshot = Document::new(doc.path().to_path_buf(), doc.text().to_string());
         Session {
+            snapshot,
             doc,
             component,
             live: Rc::new(RefCell::new(None)),
@@ -95,11 +101,16 @@ impl Session {
         &self.diagnostics
     }
 
+    fn set_snapshot(&mut self) {
+        self.snapshot = Document::new(self.doc.path().to_path_buf(), self.doc.text().to_string());
+    }
+
     /// Compiles the document; on success returns a factory whose created instance lands in `live`.
     pub fn rebuild(&mut self) -> Option<slint::ComponentFactory> {
         match compile(self.doc.text(), self.doc.path(), &self.component) {
             Ok(c) => {
                 self.diagnostics.clear();
+                self.set_snapshot();
                 Some(c.factory(self.live.clone()))
             }
             Err(d) => {
@@ -114,6 +125,7 @@ impl Session {
         match compile(self.doc.text(), self.doc.path(), &self.component) {
             Ok(c) => {
                 self.diagnostics.clear();
+                self.set_snapshot();
                 *self.live.borrow_mut() = Some(c.instantiate(width, height));
                 true
             }
@@ -128,7 +140,7 @@ impl Session {
         let hits = self.live.borrow().as_ref()?.hits_at(x, y);
         let candidates: Vec<ElementPath> = hits
             .iter()
-            .filter_map(|h| self.doc.path_at_offset(h.start))
+            .filter_map(|h| self.snapshot.path_at_offset(h.start))
             .filter(|p| p.component == self.component)
             .collect();
         let near = self.last_tap.is_some_and(|(lx, ly)| {
@@ -148,7 +160,7 @@ impl Session {
     }
 
     pub fn selection_hit(&self) -> Option<Hit> {
-        let info = self.doc.element(self.selection.as_ref()?)?;
+        let info = self.snapshot.element(self.selection.as_ref()?)?;
         self.live.borrow().as_ref()?.geometry(info.start)
     }
 
@@ -220,12 +232,25 @@ impl Session {
             bindings.push(("x".into(), Some(format!("{}px", l as i32))));
             bindings.push(("y".into(), Some(format!("{}px", t as i32))));
         }
-        bindings.push(("width".into(), Some(format!("{}px", (rt - l) as i32))));
-        bindings.push(("height".into(), Some(format!("{}px", (b - t) as i32))));
+        bindings.push((
+            "width".into(),
+            Some(format!("{}px", (rt - l).round() as i32)),
+        ));
+        bindings.push((
+            "height".into(),
+            Some(format!("{}px", (b - t).round() as i32)),
+        ));
         self.apply(Op::SetBindings { path, bindings })
     }
 
+    /// Applies an edit. While the preview is stale (`diagnostics` non-empty) structural ops
+    /// (insert, remove, move, wrap, unwrap, extract) are refused with `Compile`; `SetBindings`
+    /// and `AddDeclaration` stay allowed.
     pub fn apply(&mut self, op: Op) -> Result<(), SessionError> {
+        let structural = !matches!(op, Op::SetBindings { .. } | Op::AddDeclaration { .. });
+        if structural && !self.diagnostics.is_empty() {
+            return Err(SessionError::Compile(self.diagnostics.clone()));
+        }
         if let Some(p) = self.doc.apply(op)? {
             self.selection = Some(p);
         }

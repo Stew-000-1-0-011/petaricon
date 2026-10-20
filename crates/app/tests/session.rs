@@ -95,3 +95,99 @@ fn compile_error_keeps_previous_instance() {
     s.move_selection(8., 8.).unwrap();
     assert!(s.doc().text().contains("x: 20px;"), "{}", s.doc().text());
 }
+
+#[test]
+fn stale_offsets_after_top_edit_still_hit_right_element() {
+    let mut s = session();
+    s.replace_text(format!(
+        "// header comment\n// more\nexport component Broken {{ Text {{ text: 1 +; }} }}\n{SRC}"
+    ));
+    assert!(!s.rebuild_standalone(300., 300.));
+    assert_eq!(s.tap(25., 25.), Some(path(&[0, 0])));
+    s.move_selection(8., 8.).unwrap();
+    let t = s.doc().text();
+    assert!(t.contains("x: 20px;"), "{t}");
+    assert!(t.matches("x: 10px;").count() == 1, "{t}");
+}
+
+#[test]
+fn length_changing_move_then_tap_and_move_again() {
+    let mut s = session();
+    s.tap(60., 60.);
+    s.move_selection(13., 6.).unwrap(); // x: 10px -> 24px, no rebuild
+    assert_eq!(s.tap(25., 25.), Some(path(&[0, 0])));
+    s.move_selection(8., 8.).unwrap();
+    let t = s.doc().text();
+    assert!(t.contains("x: 24px;") && t.contains("x: 20px;"), "{t}");
+}
+
+#[test]
+fn structural_op_while_stale_is_refused() {
+    let mut s = session();
+    s.replace_text(format!(
+        "{SRC}\nexport component Broken {{ Text {{ text: 1 +; }} }}\n"
+    ));
+    assert!(!s.rebuild_standalone(300., 300.));
+    let before = s.doc().text().to_string();
+    let r = s.apply(slint_doc::Op::RemoveElement { path: path(&[0]) });
+    assert!(matches!(r, Err(SessionError::Compile(_))));
+    assert_eq!(s.doc().text(), before);
+}
+
+#[test]
+fn tap_cycle_wraps_to_first() {
+    let mut s = session();
+    assert_eq!(s.tap(25., 25.), Some(path(&[0, 0])));
+    assert_eq!(s.tap(25., 25.), Some(path(&[0])));
+    assert_eq!(s.tap(25., 25.), Some(path(&[0, 0])));
+}
+
+#[test]
+fn tap_on_empty_area_clears_selection() {
+    let mut s = session();
+    s.tap(25., 25.);
+    assert_eq!(s.tap(900., 900.), None);
+    assert_eq!(s.selection(), None);
+}
+
+#[test]
+fn resize_layout_child_writes_only_size() {
+    let mut s = session();
+    s.tap(10., 210.);
+    s.resize_selection(Corner::BottomRight, 8., 8.).unwrap();
+    let t = s.doc().text();
+    let line = t.lines().find(|l| l.contains("Text {")).unwrap();
+    assert!(
+        line.contains("width:") && line.contains("height:"),
+        "{line}"
+    );
+    assert!(!line.contains(" x:") && !line.contains(" y:"), "{line}");
+}
+
+#[test]
+fn root_move_is_invalid_target() {
+    let mut s = session();
+    s.apply(slint_doc::Op::Unwrap {
+        layout: path(&[1]),
+        positions: vec![(0, 200)],
+    })
+    .unwrap();
+    assert_eq!(s.selection(), Some(&path(&[])));
+    assert!(matches!(
+        s.move_selection(4., 4.),
+        Err(SessionError::Edit(slint_doc::EditError::InvalidTarget(_)))
+    ));
+}
+
+#[test]
+fn resize_keeps_four_px_minimum() {
+    let mut s = session();
+    s.tap(60., 60.);
+    s.resize_selection(Corner::BottomRight, -200., -200.)
+        .unwrap();
+    let t = s.doc().text();
+    assert!(
+        t.contains("width: 4px;") && t.contains("height: 4px;"),
+        "{t}"
+    );
+}
