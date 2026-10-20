@@ -1,0 +1,15 @@
+[package]
+name = "preview"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+tidy = { path = "../tidy" }
+slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2"] }
+slint-interpreter = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "internal", "internal-highlight"] }
+i-slint-compiler = { version = "=1.18.1", default-features = false }
+i-slint-core = { version = "=1.18.1", default-features = false }
+spin_on = "0.1"
+
+[dev-dependencies]
+i-slint-backend-testing = "=1.18.1"
