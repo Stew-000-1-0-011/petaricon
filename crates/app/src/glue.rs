@@ -10,7 +10,7 @@ use slint_doc::Document;
 use storage::ProjectStore;
 
 use crate::session::{Corner, Session, TreeAction, TreeRow};
-use crate::{Editor, PropItem, TreeRowItem};
+use crate::{Editor, GuideBand, PropItem, TreeRowItem};
 
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 4.0;
@@ -18,6 +18,7 @@ const DEFAULT_PROJECT: &str = "default";
 const DEFAULT_FILE: &str = "main.slint";
 const PROP_DEBOUNCE: Duration = Duration::from_millis(300);
 const SOURCE_TAB: i32 = 3;
+const TOAST_TIME: Duration = Duration::from_secs(3);
 
 thread_local! {
     static SAVE_HOOK: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
@@ -92,6 +93,7 @@ pub struct Glue {
     /// the user applies, jumps to the error, or deliberately changes selection/file/component.
     source_dirty: bool,
     prop_timer: slint::Timer,
+    toast_timer: slint::Timer,
 }
 
 /// A property edit with the element and document it was typed for.
@@ -257,6 +259,93 @@ impl Glue {
             }
             None => ed.set_has_selection(false),
         }
+        self.update_guides();
+    }
+
+    fn update_guides(&self) {
+        let ed = self.editor();
+        let Some(g) = self.session.guides() else {
+            ed.set_has_guides(false);
+            ed.set_bands(ModelRc::new(VecModel::from(Vec::<GuideBand>::new())));
+            ed.set_has_align(false);
+            return;
+        };
+        ed.set_has_guides(true);
+        ed.set_g_x(g.outline.x);
+        ed.set_g_y(g.outline.y);
+        ed.set_g_w(g.outline.w);
+        ed.set_g_h(g.outline.h);
+        ed.set_g_vertical(g.direction == tidy::Direction::Vertical);
+        let band = |l: &crate::guides::GuideLabel, is_gap: bool| GuideBand {
+            x: l.area.x,
+            y: l.area.y,
+            w: l.area.w,
+            h: l.area.h,
+            value: l.value,
+            property: l.property.as_str().into(),
+            is_gap,
+        };
+        let bands: Vec<GuideBand> = g
+            .padding
+            .iter()
+            .map(|l| band(l, false))
+            .chain(g.gaps.iter().map(|l| band(l, true)))
+            .collect();
+        ed.set_bands(ModelRc::new(VecModel::from(bands)));
+        match g.align_line {
+            Some((x1, y1, x2, y2)) => {
+                ed.set_has_align(true);
+                ed.set_a_x(x1.min(x2));
+                ed.set_a_y(y1.min(y2));
+                ed.set_a_w((x2 - x1).abs());
+                ed.set_a_h((y2 - y1).abs());
+            }
+            None => ed.set_has_align(false),
+        }
+    }
+
+    fn toast(&mut self, text: &str) {
+        self.editor().set_toast_text(text.into());
+        let me = self.me.clone();
+        self.toast_timer.start(slint::TimerMode::SingleShot, TOAST_TIME, move || {
+            if let Some(g) = me.upgrade()
+                && let Ok(g) = g.try_borrow()
+            {
+                g.editor().set_toast_text("".into());
+            }
+        });
+    }
+
+    fn tidy(&mut self) {
+        self.flush_prop();
+        self.editor().set_message("".into());
+        match self.session.tidy_selection() {
+            Ok(warnings) => {
+                self.rebuild();
+                if let Some(w) = warnings.first() {
+                    let text = match w {
+                        tidy::Warning::AmbiguousDirection => "先に階層を分けると、きれいに整形できます",
+                        tidy::Warning::Overlap => "重なっている要素があります",
+                    };
+                    self.toast(text);
+                }
+            }
+            Err(e) => self.set_error(&e.to_string()),
+        }
+    }
+
+    fn untidy(&mut self) {
+        self.flush_prop();
+        self.editor().set_message("".into());
+        let r = self.session.untidy_selection();
+        self.after_edit(r);
+    }
+
+    fn guide_edited(&mut self, property: &str, value: &str) {
+        self.flush_prop();
+        self.editor().set_message("".into());
+        let r = self.session.set_guide_property(property, value);
+        self.after_edit(r);
     }
 
     /// Recompiles and swaps the preview; on a compile error the old preview stays and the
@@ -563,6 +652,9 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_source_edited, |g| g.source_dirty = true);
     on!(on_error_tapped, |g| g.error_tapped());
     on!(on_zoom, |g, m| g.zoom_by(m));
+    on!(on_tidy, |g| g.tidy());
+    on!(on_untidy, |g| g.untidy());
+    on!(on_guide_edited, |g, p, v| g.guide_edited(&p, &v));
 }
 
 pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint::PlatformError> {
@@ -599,6 +691,7 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
             pending_prop: None,
             source_dirty: false,
             prop_timer: slint::Timer::default(),
+            toast_timer: slint::Timer::default(),
         })
     });
     connect(editor, &glue);

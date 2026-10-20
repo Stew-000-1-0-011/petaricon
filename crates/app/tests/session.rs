@@ -565,3 +565,70 @@ fn text_keeps_surrounding_spaces_and_same_value_is_a_noop() {
     s.set_property("background", "").unwrap();
     assert!(!s.doc().is_dirty());
 }
+
+fn tidy_session(body: &str) -> Session {
+    i_slint_backend_testing::init_no_event_loop();
+    let src = format!(
+        "export component Main inherits Rectangle {{\n    width: 300px;\n    height: 300px;\n    box := Rectangle {{\n        x: 0px;\n        y: 0px;\n        width: 300px;\n        height: 100px;\n{body}    }}\n}}\n"
+    );
+    let mut s = Session::new(Document::new(PathBuf::from("/t/main.slint"), src));
+    assert!(s.rebuild_standalone(300., 300.));
+    s.select_path(path(&[0]));
+    s
+}
+
+const TWO_KIDS: &str = "        Rectangle { x: 10px; y: 10px; width: 40px; height: 30px; }\n        Rectangle { x: 60px; y: 10px; width: 40px; height: 30px; }\n";
+
+#[test]
+fn tidy_wraps_and_selects_layout() {
+    let mut s = tidy_session(TWO_KIDS);
+    let w = s.tidy_selection().unwrap();
+    assert!(w.is_empty());
+    let t = s.doc().text();
+    assert!(t.contains("HorizontalLayout {"), "{t}");
+    assert!(t.contains("spacing:"), "{t}");
+    assert!(!t.contains("x: 10px;"), "{t}");
+    assert_eq!(s.selection(), Some(&path(&[0, 0])));
+}
+
+#[test]
+fn tidy_single_child_is_vertical() {
+    let mut s = tidy_session("        Rectangle { x: 10px; y: 10px; width: 40px; height: 30px; }\n");
+    let w = s.tidy_selection().unwrap();
+    assert!(w.is_empty());
+    assert!(s.doc().text().contains("VerticalLayout {"));
+}
+
+#[test]
+fn tidy_empty_container_is_refused() {
+    let mut s = tidy_session("");
+    let before = s.doc().text().to_string();
+    assert!(matches!(s.tidy_selection(), Err(SessionError::NotAContainer)));
+    assert_eq!(s.doc().text(), before);
+}
+
+#[test]
+fn untidy_restores_visual_positions() {
+    let mut s = tidy_session(TWO_KIDS);
+    s.tidy_selection().unwrap();
+    assert!(s.rebuild_standalone(300., 300.));
+    s.untidy_selection().unwrap();
+    let t = s.doc().text();
+    assert!(!t.contains("Layout"), "{t}");
+    assert!(t.contains("x: 12px;") && t.contains("y: 12px;"), "{t}");
+    assert!(t.contains("x: 64px;"), "{t}");
+    assert_eq!(s.selection(), Some(&path(&[0])));
+}
+
+#[test]
+fn guides_and_guide_edit() {
+    let mut s = tidy_session(TWO_KIDS);
+    s.tidy_selection().unwrap();
+    assert!(s.rebuild_standalone(300., 300.));
+    s.select_path(path(&[0]));
+    let g = s.guides().expect("guides for the container");
+    assert_eq!(g.gaps.len(), 1);
+    s.set_guide_property("spacing", "20").unwrap();
+    assert!(s.doc().text().contains("spacing: 20px;"), "{}", s.doc().text());
+    assert_eq!(s.selection(), Some(&path(&[0, 0])));
+}

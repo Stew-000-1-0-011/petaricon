@@ -1,6 +1,33 @@
 // The design canvas: the live preview inside a ComponentContainer, a selection overlay,
 // and one TouchArea that decides between tap, move, resize and pan.
 
+import { LineEdit } from "std-widgets.slint";
+
+// One tappable guide number: a padding band or a spacing gap, in design coordinates.
+export struct GuideBand {
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    value: int,
+    property: string,
+    is-gap: bool,
+}
+
+// A dashed horizontal / vertical line: 6px segments with 4px gaps.
+component Dashes inherits Rectangle {
+    in property <length> len;
+    in property <bool> vertical;
+    in property <color> stroke: #4fc3f7;
+    for i in Math.ceil(root.len / 10px): Rectangle {
+        x: root.vertical ? 0px : i * 10px;
+        y: root.vertical ? i * 10px : 0px;
+        width: root.vertical ? 2px : max(0px, min(6px, root.len - i * 10px));
+        height: root.vertical ? max(0px, min(6px, root.len - i * 10px)) : 2px;
+        background: root.stroke;
+    }
+}
+
 export component Canvas inherits Rectangle {
     in property <component-factory> factory;
     in property <bool> has-selection;
@@ -12,6 +39,24 @@ export component Canvas inherits Rectangle {
     in property <length> design-w: 360px;
     in property <length> design-h: 640px;
     in property <float> zoom: 1.0;
+    in property <bool> has-guides;
+    // Layout outline in design coordinates and its direction.
+    in property <length> g-x;
+    in property <length> g-y;
+    in property <length> g-w;
+    in property <length> g-h;
+    in property <bool> g-vertical;
+    in property <[GuideBand]> bands;
+    in property <bool> has-align;
+    in property <length> a-x;
+    in property <length> a-y;
+    in property <length> a-w;
+    in property <length> a-h;
+    callback guide-edited(string /* property */, string /* value */);
+    property <string> editing-prop;
+    property <string> editing-value;
+    property <length> editing-x;
+    property <length> editing-y;
     in-out property <length> pan-x: 8px;
     in-out property <length> pan-y: 8px;
 
@@ -124,6 +169,7 @@ export component Canvas inherits Rectangle {
             height: parent.height;
             pointer-event(e) => {
                 if e.kind == PointerEventKind.down {
+                    root.editing-prop = "";
                     root.dragged = false;
                     root.drag-dx = 0;
                     root.drag-dy = 0;
@@ -171,6 +217,90 @@ export component Canvas inherits Rectangle {
                     root.pan-x = root.start-pan-x + root.drag-dx;
                     root.pan-y = root.start-pan-y + root.drag-dy;
                 }
+            }
+        }
+    }
+
+    if root.has-guides: Rectangle {
+        x: root.pan-x + root.g-x * root.zoom;
+        y: root.pan-y + root.g-y * root.zoom;
+        width: root.g-w * root.zoom;
+        height: root.g-h * root.zoom;
+        Dashes { x: 0px; y: 0px; len: parent.width; }
+        Dashes { x: 0px; y: parent.height - 2px; len: parent.width; }
+        Dashes { x: 0px; y: 0px; len: parent.height; vertical: true; }
+        Dashes { x: parent.width - 2px; y: 0px; len: parent.height; vertical: true; }
+        Text {
+            x: 4px;
+            y: 4px;
+            text: root.g-vertical ? "↓" : "→";
+            color: #4fc3f7;
+            font-size: 16px;
+        }
+    }
+
+    for b in root.bands: Rectangle {
+        x: root.pan-x + b.x * root.zoom;
+        y: root.pan-y + b.y * root.zoom;
+        width: b.w * root.zoom;
+        height: b.h * root.zoom;
+        background: b.is-gap ? #ffb74d50 : #4fc3f740;
+
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: b.value;
+            color: white;
+            font-size: 11px;
+        }
+        // At least 44px around the number.
+        TouchArea {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: max(44px, parent.width);
+            height: max(44px, parent.height);
+            clicked => {
+                root.editing-prop = b.property;
+                root.editing-value = "\{b.value}";
+                root.editing-x = max(4px, min(root.width - 124px, root.pan-x + (b.x + b.w / 2) * root.zoom - 60px));
+                root.editing-y = max(4px, min(root.height - 48px, root.pan-y + (b.y + b.h / 2) * root.zoom - 20px));
+            }
+        }
+    }
+
+    if root.has-guides && root.has-align: Rectangle {
+        x: root.pan-x + root.a-x * root.zoom;
+        y: root.pan-y + root.a-y * root.zoom;
+        Dashes {
+            x: 0px;
+            y: 0px;
+            len: (root.a-w > 0px ? root.a-w : root.a-h) * root.zoom;
+            vertical: root.a-w == 0px;
+            stroke: #f06292;
+        }
+    }
+
+    if root.editing-prop != "": Rectangle {
+        x: root.editing-x;
+        y: root.editing-y;
+        width: 120px;
+        height: 44px;
+        background: #2a2e33;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: #4fc3f7;
+        TouchArea { }
+        edit := LineEdit {
+            x: 4px;
+            y: 2px;
+            width: parent.width - 8px;
+            height: parent.height - 4px;
+            input-type: InputType.number;
+            text <=> root.editing-value;
+            init => { self.focus(); }
+            accepted(t) => {
+                root.guide-edited(root.editing-prop, t);
+                root.editing-prop = "";
             }
         }
     }

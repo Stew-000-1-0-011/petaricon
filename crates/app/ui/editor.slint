@@ -1,7 +1,7 @@
 import { Palette } from "std-widgets.slint";
-import { Canvas } from "canvas.slint";
+import { Canvas, GuideBand } from "canvas.slint";
 import { BottomPanel, ToolButton, MenuList, NewProject, TreeRowItem, PropItem } from "panels.slint";
-export { TreeRowItem, PropItem }
+export { TreeRowItem, PropItem, GuideBand }
 
 export component Editor inherits Window {
     title: "Petaricon Editor";
@@ -32,6 +32,19 @@ export component Editor inherits Window {
     in property <string> source-title;
     in-out property <string> source-text;
     in-out property <int> panel-tab: 0;
+    in property <bool> has-guides;
+    in property <length> g-x;
+    in property <length> g-y;
+    in property <length> g-w;
+    in property <length> g-h;
+    in property <bool> g-vertical;
+    in property <[GuideBand]> bands;
+    in property <bool> has-align;
+    in property <length> a-x;
+    in property <length> a-y;
+    in property <length> a-w;
+    in property <length> a-h;
+    in property <string> toast-text;
 
     callback tapped(length, length);
     callback drag-finished(length, length);
@@ -52,6 +65,9 @@ export component Editor inherits Window {
     callback source-apply(string);
     callback source-edited();
     callback error-tapped();
+    callback tidy();
+    callback untidy();
+    callback guide-edited(string, string);
 
     init => { Palette.color-scheme = ColorScheme.dark; }
 
@@ -85,8 +101,8 @@ export component Editor inherits Window {
             ToolButton { text: "Undo"; clicked => { root.undo(); } }
             ToolButton { text: "Redo"; clicked => { root.redo(); } }
             ToolButton { text: root.dirty ? "Save*" : "Save"; clicked => { root.save(); } }
-            ToolButton { text: "Tidy"; enabled: false; }
-            ToolButton { text: "Untidy"; enabled: false; }
+            ToolButton { text: "Tidy"; clicked => { root.tidy(); } }
+            ToolButton { text: "Untidy"; clicked => { root.untidy(); } }
             ToolButton { text: "Extract"; enabled: false; }
             ToolButton { text: "-"; min-width: 32px; clicked => { root.zoom(0.8); } }
             ToolButton { text: "+"; min-width: 32px; clicked => { root.zoom(1.25); } }
@@ -128,6 +144,19 @@ export component Editor inherits Window {
         sel-w: root.sel-w;
         sel-h: root.sel-h;
         zoom: root.zoom-level;
+        has-guides: root.has-guides;
+        g-x: root.g-x;
+        g-y: root.g-y;
+        g-w: root.g-w;
+        g-h: root.g-h;
+        g-vertical: root.g-vertical;
+        bands: root.bands;
+        has-align: root.has-align;
+        a-x: root.a-x;
+        a-y: root.a-y;
+        a-w: root.a-w;
+        a-h: root.a-h;
+        guide-edited(p, v) => { root.guide-edited(p, v); }
         tapped(x, y) => { root.tapped(x, y); }
         drag-finished(dx, dy) => { root.drag-finished(dx, dy); }
         resize-finished(c, dx, dy) => { root.resize-finished(c, dx, dy); }
@@ -155,6 +184,24 @@ export component Editor inherits Window {
         tree-selected(i) => { root.tree-selected(i); }
         tree-action(a) => { root.tree-action(a); }
         palette-picked(n) => { root.palette-picked(n); }
+    }
+
+    if root.toast-text != "": Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - root.inset-bottom - self.height - 24px;
+        width: min(root.width - 32px, 420px);
+        height: 44px;
+        background: #000000d0;
+        border-radius: 8px;
+        Text {
+            width: parent.width - 16px;
+            text: root.toast-text;
+            color: white;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
     }
 
     if root.menu-open: Rectangle {

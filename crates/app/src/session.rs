@@ -4,7 +4,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use preview::{Diagnostic, Hit, LiveInstance, compile};
-use slint_doc::{Document, EditError, ElementInfo, ElementKind, ElementPath, Op, TreeNode};
+use slint_doc::{
+    Document, EditError, ElementInfo, ElementKind, ElementPath, LayoutKind, Op, TreeNode,
+};
+
+use crate::guides::{self, Guides};
+use crate::layout_bridge::layout_spec;
 
 const MIN_SIZE: f32 = 4.0;
 const TAP_THRESHOLD: f32 = 8.0;
@@ -694,6 +699,116 @@ impl Session {
             }
         };
         self.insert_part(target, name)
+    }
+
+    fn child_path(parent: &ElementPath, i: usize) -> ElementPath {
+        let mut p = parent.clone();
+        p.indices.push(i);
+        p
+    }
+
+    /// Geometry in the live preview of the element at `path`.
+    fn hit_of(&self, path: &ElementPath) -> Option<Hit> {
+        let info = self.snapshot.borrow().element(path)?;
+        self.live.borrow().as_ref()?.geometry(info.start)
+    }
+
+    /// Wraps the children of the selected container in an inferred layout and selects it.
+    /// The positions come from the live preview; nothing changes when any is missing.
+    pub fn tidy_selection(&mut self) -> Result<Vec<tidy::Warning>, SessionError> {
+        let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
+        let info = self
+            .doc
+            .element(&path)
+            .ok_or_else(|| EditError::ElementNotFound(path.clone()))?;
+        if !Self::is_container(&info) || matches!(info.kind, ElementKind::Layout(_)) {
+            return Err(SessionError::NotAContainer);
+        }
+        let container = self.hit_of(&path).ok_or(SessionError::NoGeometry)?;
+        let children = (0..info.child_count)
+            .map(|i| self.hit_of(&Self::child_path(&path, i)).map(|h| h.local))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(SessionError::NoGeometry)?;
+        let plan = tidy::plan(container.rect.w, container.rect.h, &children, self.grid)
+            .ok_or(SessionError::NotAContainer)?;
+        self.apply(Op::WrapInLayout { container: path, layout: layout_spec(&plan) })?;
+        Ok(plan.warnings)
+    }
+
+    /// The layout the guides act on: the selection when it is a horizontal or vertical
+    /// layout, else the first such layout child of the selected container.
+    fn guide_layout(&self) -> Option<(ElementPath, ElementInfo, LayoutKind)> {
+        let path = self.selection.clone()?;
+        let info = self.doc.element(&path)?;
+        let stack = |i: &ElementInfo| match i.kind {
+            ElementKind::Layout(k @ (LayoutKind::Horizontal | LayoutKind::Vertical)) => Some(k),
+            _ => None,
+        };
+        if let Some(k) = stack(&info) {
+            return Some((path, info, k));
+        }
+        if !Self::is_container(&info) {
+            return None;
+        }
+        (0..info.child_count).find_map(|i| {
+            let p = Self::child_path(&path, i);
+            let ci = self.doc.element(&p)?;
+            stack(&ci).map(|k| (p, ci, k))
+        })
+    }
+
+    /// Replaces the selected layout (or the only layout of the selected container) by its
+    /// children, keeping their on-screen positions rounded to the grid.
+    pub fn untidy_selection(&mut self) -> Result<(), SessionError> {
+        let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
+        let info = self
+            .doc
+            .element(&path)
+            .ok_or_else(|| EditError::ElementNotFound(path.clone()))?;
+        let layout = if matches!(info.kind, ElementKind::Layout(_)) {
+            path
+        } else if info.child_count == 1 {
+            let c = Self::child_path(&path, 0);
+            match self.doc.element(&c) {
+                Some(ci) if matches!(ci.kind, ElementKind::Layout(_)) => c,
+                _ => return Err(SessionError::NotALayout),
+            }
+        } else {
+            return Err(SessionError::NotALayout);
+        };
+        let layout_info = self
+            .doc
+            .element(&layout)
+            .ok_or_else(|| EditError::ElementNotFound(layout.clone()))?;
+        let mut parent = layout.clone();
+        parent.indices.pop();
+        let origin = self.hit_of(&parent).ok_or(SessionError::NoGeometry)?.rect;
+        let positions = (0..layout_info.child_count)
+            .map(|i| {
+                self.hit_of(&Self::child_path(&layout, i)).map(|h| {
+                    (snap(h.rect.x - origin.x, self.grid), snap(h.rect.y - origin.y, self.grid))
+                })
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or(SessionError::NoGeometry)?;
+        self.apply(Op::Unwrap { layout, positions })
+    }
+
+    /// Guides of the selected layout, or of the layout inside the selected container.
+    pub fn guides(&self) -> Option<Guides> {
+        let (path, info, kind) = self.guide_layout()?;
+        let layout = self.hit_of(&path)?;
+        let children: Vec<Hit> = (0..info.child_count)
+            .map(|i| self.hit_of(&Self::child_path(&path, i)))
+            .collect::<Option<_>>()?;
+        Some(guides::compute(&layout, kind, &children, &info.bindings))
+    }
+
+    /// Edits a property of the guided layout, selecting the layout first when needed.
+    pub fn set_guide_property(&mut self, name: &str, value: &str) -> Result<(), SessionError> {
+        let (path, ..) = self.guide_layout().ok_or(SessionError::NotALayout)?;
+        self.selection = Some(path);
+        self.set_property(name, value)
     }
 
     pub fn tree_action(&mut self, path: &ElementPath, action: TreeAction) -> Result<(), SessionError> {

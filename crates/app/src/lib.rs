@@ -1,5 +1,7 @@
 pub mod crashlog;
 pub mod glue;
+pub mod guides;
+pub mod layout_bridge;
 pub mod session;
 
 use std::path::PathBuf;
