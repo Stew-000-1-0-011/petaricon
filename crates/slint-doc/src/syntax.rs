@@ -77,3 +77,26 @@ pub(crate) fn resolve(
     }
     Some((wrapper, element))
 }
+
+/// Leading whitespace of the line containing `pos`.
+pub(crate) fn line_indent(text: &str, pos: usize) -> String {
+    let ls = text[..pos].rfind('\n').map_or(0, |i| i + 1);
+    text[ls..]
+        .chars()
+        .take_while(|c| matches!(c, ' ' | '\t'))
+        .collect()
+}
+
+/// Indentation of the line an element starts on.
+pub(crate) fn element_indent(text: &str, element: &SyntaxNode) -> String {
+    line_indent(text, usize::from(element.text_range().start()))
+}
+
+/// Indentation for children of `element`: that of its first child, or the element's own
+/// indentation plus four spaces when it has none.
+pub(crate) fn child_indent(text: &str, element: &SyntaxNode) -> String {
+    match element_children(element).first() {
+        Some(child) => line_indent(text, usize::from(child.text_range().start())),
+        None => format!("{}    ", element_indent(text, element)),
+    }
+}
