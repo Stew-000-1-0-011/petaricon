@@ -1,0 +1,89 @@
+import { Button, Slider, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    title: "Point cloud spike";
+    preferred-width: 480px;
+    preferred-height: 800px;
+    background: #101418;
+
+    in property <image> cloud-texture;
+    in property <string> stats-text: "starting...";
+    in-out property <float> yaw: 0.6;
+    in-out property <float> pitch: 0.35;
+    in-out property <float> zoom: 1.0;
+    in-out property <float> spin-speed: 0.3;
+    // Physical size of the viewport so Rust can size the render target.
+    out property <length> view-width: view.width;
+    out property <length> view-height: view.height;
+
+    callback set-point-count(int);
+
+    property <length> last-x;
+    property <length> last-y;
+
+    VerticalLayout {
+        view := Rectangle {
+            vertical-stretch: 1;
+            background: black;
+
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.cloud-texture;
+                image-fit: fill;
+            }
+
+            TouchArea {
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.down {
+                        root.last-x = self.mouse-x;
+                        root.last-y = self.mouse-y;
+                    }
+                }
+                moved => {
+                    root.yaw += (self.mouse-x - root.last-x) / 1px * 0.01;
+                    root.pitch = clamp(root.pitch + (self.mouse-y - root.last-y) / 1px * 0.01, -1.5, 1.5);
+                    root.last-x = self.mouse-x;
+                    root.last-y = self.mouse-y;
+                }
+                scroll-event(e) => {
+                    root.zoom = clamp(root.zoom * (e.delta-y > 0 ? 1.1 : 0.9), 0.2, 5.0);
+                    accept
+                }
+            }
+
+            Text {
+                x: 8px;
+                y: 8px;
+                text: root.stats-text;
+                color: #7CFC00;
+                font-size: 14px;
+            }
+        }
+
+        VerticalBox {
+            HorizontalBox {
+                Text { text: "Points"; vertical-alignment: center; color: white; }
+                Button { text: "100k"; clicked => { root.set-point-count(100000); } }
+                Button { text: "300k"; clicked => { root.set-point-count(300000); } }
+                Button { text: "1M"; clicked => { root.set-point-count(1000000); } }
+            }
+            HorizontalBox {
+                Text { text: "Spin"; vertical-alignment: center; color: white; }
+                Slider {
+                    minimum: 0;
+                    maximum: 2;
+                    value <=> root.spin-speed;
+                }
+            }
+            HorizontalBox {
+                Text { text: "Zoom"; vertical-alignment: center; color: white; }
+                Slider {
+                    minimum: 0.2;
+                    maximum: 5;
+                    value <=> root.zoom;
+                }
+            }
+        }
+    }
+}
