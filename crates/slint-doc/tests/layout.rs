@@ -169,3 +169,132 @@ fn unwrap_rejects_invalid() {
     assert!(matches!(r, Err(EditError::InvalidTarget(_))));
     assert_eq!(d.text(), src);
 }
+
+fn vwrap(order: Vec<usize>) -> Op {
+    Op::WrapInLayout {
+        container: p(&[0]),
+        layout: LayoutSpec {
+            kind: LayoutKind::Vertical,
+            order,
+            bindings: vec![("spacing".into(), "4px".into())],
+        },
+    }
+}
+
+#[test]
+fn wrap_vertical_keeps_trailing_comment_with_child() {
+    let src = "export component Main inherits Window {
+    panel := Rectangle {
+        Text { x: 1px; y: 2px; text: \"a\"; } // label
+        Text { x: 3px; text: \"b\"; }
+    }
+}
+";
+    let mut d = Document::new("m.slint".into(), src.into());
+    assert_eq!(d.apply(vwrap(vec![1, 0])).unwrap(), Some(p(&[0, 0])));
+    let expected = "export component Main inherits Window {
+    panel := Rectangle {
+        VerticalLayout {
+            spacing: 4px;
+            Text { text: \"b\"; }
+            Text { text: \"a\"; } // label
+        }
+    }
+}
+";
+    assert_eq!(d.text(), expected);
+    assert!(d.undo());
+    assert_eq!(d.text(), src);
+}
+
+#[test]
+fn wrap_when_first_child_shares_its_line() {
+    let src = "export component Main inherits Window {
+    panel := Rectangle { Text { x: 1px; text: \"a\"; } Text { y: 3px; text: \"b\"; } }
+}
+";
+    let mut d = Document::new("m.slint".into(), src.into());
+    d.apply(vwrap(vec![0, 1])).unwrap();
+    let expected = "export component Main inherits Window {
+    panel := Rectangle { VerticalLayout {
+        spacing: 4px;
+        Text { text: \"a\"; }
+        Text { text: \"b\"; }
+    } }
+}
+";
+    assert_eq!(d.text(), expected);
+}
+
+#[test]
+fn unwrap_inline_and_trailing_comment_travel() {
+    let src = "export component Main inherits Window {
+    panel := Rectangle { VerticalLayout { Text { text: \"a\"; } // note
+        Text { text: \"b\"; }
+    } }
+}
+";
+    let mut d = Document::new("m.slint".into(), src.into());
+    d.apply(Op::Unwrap {
+        layout: p(&[0, 0]),
+        positions: vec![(1, 2), (3, 4)],
+    })
+    .unwrap();
+    let expected = "export component Main inherits Window {
+    panel := Rectangle { Text { x: 1px; y: 2px; text: \"a\"; } // note
+    Text { x: 3px; y: 4px; text: \"b\"; } }
+}
+";
+    assert_eq!(d.text(), expected);
+}
+
+#[test]
+fn unwrap_keeps_all_comments() {
+    let src = "export component Main inherits Window {
+    panel := Rectangle {
+        // about the layout
+        HorizontalLayout { // trailing brace
+            spacing: 8px;
+            // loose
+
+            Text { text: \"a\"; } // label a
+            // for b
+            Text { text: \"b\"; }
+            // at the end
+        } // after
+    }
+}
+";
+    let mut d = Document::new("m.slint".into(), src.into());
+    d.apply(Op::Unwrap {
+        layout: p(&[0, 0]),
+        positions: vec![(1, 2), (3, 4)],
+    })
+    .unwrap();
+    let expected = "export component Main inherits Window {
+    panel := Rectangle {
+        // about the layout
+        Text { x: 1px; y: 2px; text: \"a\"; } // label a
+        // for b
+        Text { x: 3px; y: 4px; text: \"b\"; }
+        // trailing brace
+        // loose
+        // at the end
+        // after
+    }
+}
+";
+    assert_eq!(d.text(), expected);
+}
+
+#[test]
+fn unwrap_then_undo_is_one_step() {
+    let mut d = Document::new("m.slint".into(), WRAPPED.into());
+    d.apply(Op::Unwrap {
+        layout: p(&[0, 0]),
+        positions: vec![(1, 1), (2, 2)],
+    })
+    .unwrap();
+    assert!(d.undo());
+    assert_eq!(d.text(), WRAPPED);
+}

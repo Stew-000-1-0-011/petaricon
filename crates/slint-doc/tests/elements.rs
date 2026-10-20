@@ -37,10 +37,7 @@ fn insert_at_end_of_container() {
     assert_eq!(r, Some(p(&[0, 2])));
     assert_eq!(
         d.text(),
-        SRC2.replace(
-            "height: 10px; }\n",
-            "height: 10px; }\n        Button { }\n"
-        )
+        SRC2.replace("height: 10px; }\n", "height: 10px; }\n        Button { }\n")
     );
 }
 
@@ -60,7 +57,10 @@ fn insert_first_and_into_empty() {
     ));
     let mut d = Document::new("m.slint".into(), "component A inherits Window { }\n".into());
     d.apply(Op::InsertElement {
-        parent: ElementPath { component: "A".into(), indices: vec![] },
+        parent: ElementPath {
+            component: "A".into(),
+            indices: vec![],
+        },
         index: None,
         source: "Text { }".into(),
     })
@@ -73,7 +73,11 @@ fn insert_rejects_bad_source() {
     let mut d = doc();
     for s in ["", "Button { } Button { }", "Button {"] {
         assert!(matches!(
-            d.apply(Op::InsertElement { parent: p(&[0]), index: None, source: s.into() }),
+            d.apply(Op::InsertElement {
+                parent: p(&[0]),
+                index: None,
+                source: s.into()
+            }),
             Err(EditError::InvalidTarget(_))
         ));
     }
@@ -83,7 +87,10 @@ fn insert_rejects_bad_source() {
 #[test]
 fn remove_takes_leading_comment() {
     let mut d = doc();
-    assert_eq!(d.apply(Op::RemoveElement { path: p(&[0, 0]) }).unwrap(), None);
+    assert_eq!(
+        d.apply(Op::RemoveElement { path: p(&[0, 0]) }).unwrap(),
+        None
+    );
     assert_eq!(
         d.text(),
         SRC2.replace(
@@ -107,7 +114,11 @@ fn remove_root_is_invalid() {
 fn move_into_layout_strips_xy() {
     let mut d = doc();
     let r = d
-        .apply(Op::MoveElement { path: p(&[0, 1]), new_parent: p(&[1]), index: Some(0) })
+        .apply(Op::MoveElement {
+            path: p(&[0, 1]),
+            new_parent: p(&[1]),
+            index: Some(0),
+        })
         .unwrap();
     assert_eq!(r, Some(p(&[1, 0])));
     assert_eq!(
@@ -131,12 +142,18 @@ fn move_into_layout_strips_xy() {
 fn move_keeps_id() {
     let mut d = doc();
     let r = d
-        .apply(Op::MoveElement { path: p(&[0]), new_parent: p(&[1]), index: None })
+        .apply(Op::MoveElement {
+            path: p(&[0]),
+            new_parent: p(&[1]),
+            index: None,
+        })
         .unwrap();
     assert_eq!(r, Some(p(&[0, 1])));
     assert!(d.text().contains("box := Rectangle {"));
     assert_eq!(d.element(&p(&[0, 1])).unwrap().id.as_deref(), Some("box"));
-    assert!(d.text().contains("        box := Rectangle {\n            // the stop button\n            Text {"));
+    assert!(d.text().contains(
+        "        box := Rectangle {\n            // the stop button\n            Text {"
+    ));
     assert_eq!(d.tree("Main").unwrap().children.len(), 1);
 }
 
@@ -144,7 +161,11 @@ fn move_keeps_id() {
 fn reorder_within_parent() {
     let mut d = doc();
     let r = d
-        .apply(Op::MoveElement { path: p(&[0, 0]), new_parent: p(&[0]), index: Some(1) })
+        .apply(Op::MoveElement {
+            path: p(&[0, 0]),
+            new_parent: p(&[0]),
+            index: Some(1),
+        })
         .unwrap();
     assert_eq!(r, Some(p(&[0, 1])));
     assert_eq!(d.element(&p(&[0, 1])).unwrap().bindings.len(), 3);
@@ -157,12 +178,20 @@ fn cannot_move_into_descendant() {
     let mut d = doc();
     for (from, to) in [(vec![0], vec![0, 1]), (vec![0], vec![0])] {
         assert!(matches!(
-            d.apply(Op::MoveElement { path: p(&from), new_parent: p(&to), index: None }),
+            d.apply(Op::MoveElement {
+                path: p(&from),
+                new_parent: p(&to),
+                index: None
+            }),
             Err(EditError::InvalidTarget(_))
         ));
     }
     assert!(matches!(
-        d.apply(Op::MoveElement { path: p(&[]), new_parent: p(&[0]), index: None }),
+        d.apply(Op::MoveElement {
+            path: p(&[]),
+            new_parent: p(&[0]),
+            index: None
+        }),
         Err(EditError::InvalidTarget(_))
     ));
     assert_eq!(d.text(), SRC2);
@@ -171,7 +200,12 @@ fn cannot_move_into_descendant() {
 #[test]
 fn undo_restores_after_move() {
     let mut d = doc();
-    d.apply(Op::MoveElement { path: p(&[0]), new_parent: p(&[1]), index: None }).unwrap();
+    d.apply(Op::MoveElement {
+        path: p(&[0]),
+        new_parent: p(&[1]),
+        index: None,
+    })
+    .unwrap();
     assert!(d.undo());
     assert_eq!(d.text(), SRC2);
 }
@@ -203,13 +237,19 @@ fn remove_for_and_if_wrappers() {
     d.apply(Op::RemoveElement { path: p(&[0, 1]) }).unwrap();
     assert_eq!(
         d.text(),
-        SRC3.replace("        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n", "")
+        SRC3.replace(
+            "        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n",
+            ""
+        )
     );
     d.apply(Op::RemoveElement { path: p(&[0, 1]) }).unwrap();
     assert_eq!(
         d.text(),
-        SRC3.replace("        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n", "")
-            .replace("        if root.visible: Text { text: \"b\"; }\n", "")
+        SRC3.replace(
+            "        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n",
+            ""
+        )
+        .replace("        if root.visible: Text { text: \"b\"; }\n", "")
     );
 }
 
@@ -217,16 +257,23 @@ fn remove_for_and_if_wrappers() {
 fn move_for_wrapper_into_layout() {
     let mut d = doc3();
     let r = d
-        .apply(Op::MoveElement { path: p(&[0, 1]), new_parent: p(&[1]), index: Some(0) })
+        .apply(Op::MoveElement {
+            path: p(&[0, 1]),
+            new_parent: p(&[1]),
+            index: Some(0),
+        })
         .unwrap();
     assert_eq!(r, Some(p(&[1, 0])));
     assert_eq!(
         d.text(),
-        SRC3.replace("        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n", "")
-            .replace(
-                "    VerticalLayout {\n",
-                "    VerticalLayout {\n        for i in 3: Rectangle { width: 5px; }\n"
-            )
+        SRC3.replace(
+            "        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n",
+            ""
+        )
+        .replace(
+            "    VerticalLayout {\n",
+            "    VerticalLayout {\n        for i in 3: Rectangle { width: 5px; }\n"
+        )
     );
 }
 
@@ -243,7 +290,11 @@ fn move_id_into_layout_keeps_id_strips_xy() {
 ";
     let mut d = Document::new("m.slint".into(), src.into());
     let r = d
-        .apply(Op::MoveElement { path: p(&[0, 0]), new_parent: p(&[1]), index: None })
+        .apply(Op::MoveElement {
+            path: p(&[0, 0]),
+            new_parent: p(&[1]),
+            index: None,
+        })
         .unwrap();
     assert_eq!(r, Some(p(&[1, 1])));
     assert_eq!(
@@ -281,7 +332,11 @@ fn move_multiline_with_comment_between_indent_levels() {
 ";
     let mut d = Document::new("m.slint".into(), src.into());
     let r = d
-        .apply(Op::MoveElement { path: p(&[0, 0]), new_parent: p(&[1, 0]), index: None })
+        .apply(Op::MoveElement {
+            path: p(&[0, 0]),
+            new_parent: p(&[1, 0]),
+            index: None,
+        })
         .unwrap();
     assert_eq!(r, Some(p(&[1, 0, 1])));
     assert_eq!(
@@ -308,7 +363,11 @@ fn move_id_out_of_layout_keeps_xy() {
     let mut d = doc3();
     // Out of the layout into a free container: text kept intact (x stays).
     let r = d
-        .apply(Op::MoveElement { path: p(&[1, 0]), new_parent: p(&[0]), index: Some(0) })
+        .apply(Op::MoveElement {
+            path: p(&[1, 0]),
+            new_parent: p(&[0]),
+            index: Some(0),
+        })
         .unwrap();
     assert_eq!(r, Some(p(&[0, 0])));
     assert_eq!(
@@ -339,13 +398,21 @@ fn blank_line_detaches_comment() {
 fn noop_move_and_adjacent_swap() {
     let mut d = doc3();
     let r = d
-        .apply(Op::MoveElement { path: p(&[0, 1]), new_parent: p(&[0]), index: Some(1) })
+        .apply(Op::MoveElement {
+            path: p(&[0, 1]),
+            new_parent: p(&[0]),
+            index: Some(1),
+        })
         .unwrap();
     assert_eq!(r, Some(p(&[0, 1])));
     assert_eq!(d.text(), SRC3);
 
     let r = d
-        .apply(Op::MoveElement { path: p(&[0, 0]), new_parent: p(&[0]), index: Some(1) })
+        .apply(Op::MoveElement {
+            path: p(&[0, 0]),
+            new_parent: p(&[0]),
+            index: Some(1),
+        })
         .unwrap();
     assert_eq!(r, Some(p(&[0, 1])));
     assert_eq!(
@@ -358,7 +425,11 @@ fn noop_move_and_adjacent_swap() {
 
     let mut d = doc3();
     let r = d
-        .apply(Op::MoveElement { path: p(&[0, 1]), new_parent: p(&[0]), index: Some(0) })
+        .apply(Op::MoveElement {
+            path: p(&[0, 1]),
+            new_parent: p(&[0]),
+            index: Some(0),
+        })
         .unwrap();
     assert_eq!(r, Some(p(&[0, 0])));
     assert_eq!(
@@ -376,16 +447,26 @@ fn inline_remove_and_move() {
     d.apply(Op::RemoveElement { path: p(&[2, 0]) }).unwrap();
     assert_eq!(
         d.text(),
-        SRC3.replace("Rectangle { Text { } Rectangle { } }", "Rectangle { Rectangle { } }")
+        SRC3.replace(
+            "Rectangle { Text { } Rectangle { } }",
+            "Rectangle { Rectangle { } }"
+        )
     );
 
     let mut d = doc3();
     let r = d
-        .apply(Op::MoveElement { path: p(&[2, 1]), new_parent: p(&[2]), index: Some(0) })
+        .apply(Op::MoveElement {
+            path: p(&[2, 1]),
+            new_parent: p(&[2]),
+            index: Some(0),
+        })
         .unwrap();
     assert_eq!(r, Some(p(&[2, 0])));
     assert_eq!(
         d.text(),
-        SRC3.replace("Rectangle { Text { } Rectangle { } }", "Rectangle { Rectangle { } Text { } }")
+        SRC3.replace(
+            "Rectangle { Text { } Rectangle { } }",
+            "Rectangle { Rectangle { } Text { } }"
+        )
     );
 }

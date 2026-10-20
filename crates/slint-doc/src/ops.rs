@@ -191,8 +191,12 @@ fn extent(text: &str, wrapper: &SyntaxNode) -> Extent {
     let (s, e) = range(wrapper);
     let ls = line_start(text, s);
     let le = line_end(text, e);
-    let owns_line = text[ls..s].trim().is_empty() && text[e..le].trim().is_empty();
+    // A same-line trailing `//` comment belongs to the element.
+    let trailing = text[e..le].trim_end();
+    let owns_line = text[ls..s].trim().is_empty()
+        && (trailing.trim().is_empty() || trailing.trim_start().starts_with("//"));
     if owns_line {
+        let e = e + trailing.len();
         let mut start = ls;
         while start > 0 {
             let prev = line_start(text, start - 1);
@@ -209,8 +213,7 @@ fn extent(text: &str, wrapper: &SyntaxNode) -> Extent {
                 rm_start -= 1;
             }
         }
-        // Keep a trailing `\r` of this line out of the removed range.
-        let rm_end = e + text[e..le].trim_end_matches('\r').len();
+        let rm_end = e;
         return Extent {
             start,
             end: e,
@@ -222,6 +225,12 @@ fn extent(text: &str, wrapper: &SyntaxNode) -> Extent {
     while rm_start > 0 && matches!(text.as_bytes()[rm_start - 1], b' ' | b'\t') {
         rm_start -= 1;
     }
+    // A trailing `//` comment runs to the end of the line, so it belongs to the element.
+    let e = if trailing.trim_start().starts_with("//") {
+        e + trailing.len()
+    } else {
+        e
+    };
     Extent {
         start: s,
         end: e,
@@ -361,21 +370,62 @@ fn plain_children(element: &SyntaxNode) -> Result<Vec<SyntaxNode>, EditError> {
     Ok(children)
 }
 
-/// Replacement for the removed range of `first` (see [`Extent::remove`]) holding `block`.
+/// The edit that replaces `first` (see [`Extent`]) by `block`. Text that is not part of the
+/// element stays where it was; an element sharing its line is replaced in place.
 fn replace_extent(text: &str, first: &SyntaxNode, block: String) -> TextEdit {
     let ext = extent(text, first);
-    let text = if block.is_empty() {
-        String::new()
-    } else if ext.line_mode {
-        format!("\n{block}")
+    if ext.line_mode {
+        TextEdit {
+            start: ext.remove.0,
+            end: ext.remove.1,
+            text: if block.is_empty() {
+                String::new()
+            } else {
+                format!("\n{block}")
+            },
+        }
     } else {
-        format!(" {}", block.trim_start())
-    };
-    TextEdit {
-        start: ext.remove.0,
-        end: ext.remove.1,
-        text,
+        TextEdit {
+            start: ext.start,
+            end: ext.end,
+            text: block.trim_start().to_string(),
+        }
     }
+}
+
+/// `//` comment lines of a layout that no child owns: the layout's own trailing comment and
+/// comment lines between its children.
+fn loose_comments(
+    text: &str,
+    wrapper: &SyntaxNode,
+    layout: &SyntaxNode,
+    children: &[SyntaxNode],
+) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut scan = |seg: &str| {
+        found.extend(
+            seg.lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with("//"))
+                .map(str::to_string),
+        );
+    };
+    let (Some(lb), Some(rb)) = (
+        layout.child_token(SyntaxKind::LBrace),
+        layout.child_token(SyntaxKind::RBrace),
+    ) else {
+        return found;
+    };
+    let mut cursor = usize::from(lb.text_range().end());
+    for c in children {
+        let ext = extent(text, c);
+        scan(&text[cursor..ext.start.max(cursor)]);
+        cursor = cursor.max(ext.end);
+    }
+    scan(&text[cursor..usize::from(rb.text_range().start())]);
+    let (_, wrapper_end) = range(wrapper);
+    scan(&text[wrapper_end..extent(text, wrapper).end]);
+    found
 }
 
 fn resolve_in(
@@ -602,7 +652,19 @@ impl Document {
                     ));
                 }
                 let indent = syntax::child_indent(&self.text, &parent);
-                let mut blocks = Vec::new();
+                let ext = extent(&self.text, &wrapper);
+                // Comments attached above the layout lead the restored children; loose ones
+                // inside it follow them.
+                let mut blocks: Vec<String> = Vec::new();
+                if ext.line_mode {
+                    let above = &self.text[ext.start..line_start(&self.text, range(&wrapper).0)];
+                    blocks.extend(
+                        above
+                            .lines()
+                            .map(|l| format!("{indent}{}", l.trim()))
+                            .collect::<Vec<_>>(),
+                    );
+                }
                 for (c, (px, py)) in children.iter().zip(&positions) {
                     let set = [
                         ("x".to_string(), Some(format!("{px}px"))),
@@ -610,7 +672,17 @@ impl Document {
                     ];
                     blocks.push(child_block(&self.text, c, &set, &indent)?);
                 }
-                let edit = replace_extent(&self.text, &wrapper, blocks.join("\n"));
+                let loose = loose_comments(&self.text, &wrapper, &element, &children);
+                for l in &loose {
+                    blocks.push(format!("{indent}{l}"));
+                }
+                let loose_last = !loose.is_empty();
+                let mut edit = replace_extent(&self.text, &wrapper, blocks.join("\n"));
+                // A comment must not swallow code that follows it on the same line.
+                let after = &self.text[ext.end..line_end(&self.text, ext.end)];
+                if !ext.line_mode && loose_last && !after.trim().is_empty() {
+                    edit.text.push_str(&format!("\n{indent}"));
+                }
                 (apply_edits(&self.text, vec![edit])?, Some(parent_path))
             }
         };
