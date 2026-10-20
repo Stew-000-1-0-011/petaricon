@@ -175,3 +175,136 @@ fn undo_restores_after_move() {
     assert!(d.undo());
     assert_eq!(d.text(), SRC2);
 }
+
+const SRC3: &str = "export component Main inherits Window {
+    Rectangle {
+        Text { text: \"a\"; }
+        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }
+        if root.visible: Text { text: \"b\"; }
+
+        // detached
+
+        Text { text: \"c\"; }
+    }
+    VerticalLayout {
+        b := Text { x: 3px; text: \"d\"; }
+    }
+    Rectangle { Text { } Rectangle { } }
+}
+";
+
+fn doc3() -> Document {
+    Document::new("m.slint".into(), SRC3.into())
+}
+
+#[test]
+fn remove_for_and_if_wrappers() {
+    let mut d = doc3();
+    d.apply(Op::RemoveElement { path: p(&[0, 1]) }).unwrap();
+    assert_eq!(
+        d.text(),
+        SRC3.replace("        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n", "")
+    );
+    d.apply(Op::RemoveElement { path: p(&[0, 1]) }).unwrap();
+    assert_eq!(
+        d.text(),
+        SRC3.replace("        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n", "")
+            .replace("        if root.visible: Text { text: \"b\"; }\n", "")
+    );
+}
+
+#[test]
+fn move_for_and_id_wrappers_into_layout() {
+    let mut d = doc3();
+    let r = d
+        .apply(Op::MoveElement { path: p(&[0, 1]), new_parent: p(&[1]), index: Some(0) })
+        .unwrap();
+    assert_eq!(r, Some(p(&[1, 0])));
+    assert!(d.text().contains(
+        "    VerticalLayout {\n        for i in 3: Rectangle { width: 5px; }\n        b := Text {"
+    ));
+    assert!(!d.text().contains("y: 2px"));
+}
+
+#[test]
+fn move_id_wrapper_keeps_id_and_strips_xy() {
+    let mut d = doc3();
+    // Out of the layout into a free container: text kept intact (x stays).
+    let r = d
+        .apply(Op::MoveElement { path: p(&[1, 0]), new_parent: p(&[0]), index: Some(0) })
+        .unwrap();
+    assert_eq!(r, Some(p(&[0, 0])));
+    assert_eq!(
+        d.text(),
+        SRC3.replace(
+            "        b := Text { x: 3px; text: \"d\"; }\n",
+            ""
+        )
+        .replace(
+            "    Rectangle {\n        Text { text: \"a\"; }",
+            "    Rectangle {\n        b := Text { x: 3px; text: \"d\"; }\n        Text { text: \"a\"; }"
+        )
+    );
+}
+
+#[test]
+fn blank_line_detaches_comment() {
+    let mut d = doc3();
+    d.apply(Op::RemoveElement { path: p(&[0, 3]) }).unwrap();
+    assert_eq!(
+        d.text(),
+        SRC3.replace("\n        Text { text: \"c\"; }", "")
+    );
+    assert!(d.text().contains("// detached"));
+}
+
+#[test]
+fn noop_move_and_adjacent_swap() {
+    let mut d = doc3();
+    let r = d
+        .apply(Op::MoveElement { path: p(&[0, 1]), new_parent: p(&[0]), index: Some(1) })
+        .unwrap();
+    assert_eq!(r, Some(p(&[0, 1])));
+    assert_eq!(d.text(), SRC3);
+
+    let r = d
+        .apply(Op::MoveElement { path: p(&[0, 0]), new_parent: p(&[0]), index: Some(1) })
+        .unwrap();
+    assert_eq!(r, Some(p(&[0, 1])));
+    assert_eq!(
+        d.text(),
+        SRC3.replace(
+            "        Text { text: \"a\"; }\n        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n",
+            "        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n        Text { text: \"a\"; }\n"
+        )
+    );
+
+    let mut d = doc3();
+    let r = d
+        .apply(Op::MoveElement { path: p(&[0, 1]), new_parent: p(&[0]), index: Some(0) })
+        .unwrap();
+    assert_eq!(r, Some(p(&[0, 0])));
+    assert!(d.text().contains(
+        "    Rectangle {\n        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n        Text { text: \"a\"; }\n        if root"
+    ));
+}
+
+#[test]
+fn inline_remove_and_move() {
+    let mut d = doc3();
+    d.apply(Op::RemoveElement { path: p(&[2, 0]) }).unwrap();
+    assert_eq!(
+        d.text(),
+        SRC3.replace("Rectangle { Text { } Rectangle { } }", "Rectangle { Rectangle { } }")
+    );
+
+    let mut d = doc3();
+    let r = d
+        .apply(Op::MoveElement { path: p(&[2, 1]), new_parent: p(&[2]), index: Some(0) })
+        .unwrap();
+    assert_eq!(r, Some(p(&[2, 0])));
+    assert_eq!(
+        d.text(),
+        SRC3.replace("Rectangle { Text { } Rectangle { } }", "Rectangle { Rectangle { } Text { } }")
+    );
+}

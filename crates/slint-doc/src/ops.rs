@@ -383,7 +383,7 @@ impl Document {
                 }
                 let ext = extent(&self.text, &wrapper);
                 let from_indent = if ext.line_mode {
-                    syntax::line_indent(&self.text, ext.end)
+                    syntax::line_indent(&self.text, ext.start)
                 } else {
                     String::new()
                 };
