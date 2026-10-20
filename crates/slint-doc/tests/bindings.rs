@@ -154,3 +154,82 @@ fn replace_text_is_one_undo_step_and_saved_tracking() {
     d.undo();
     assert!(d.is_dirty());
 }
+
+fn set(
+    d: &mut Document,
+    path: ElementPath,
+    b: Vec<(&str, Option<&str>)>,
+) -> Result<Option<ElementPath>, EditError> {
+    d.apply(Op::SetBindings {
+        path,
+        bindings: b
+            .into_iter()
+            .map(|(n, v)| (n.to_string(), v.map(String::from)))
+            .collect(),
+    })
+}
+
+#[test]
+fn duplicate_names_are_rejected_without_change() {
+    let mut d = Document::new("m.slint".into(), SRC.into());
+    for b in [
+        vec![("x", Some("1px")), ("x", Some("2px"))],
+        vec![("x", Some("1px")), ("x", None)],
+        vec![("width", Some("1px")), ("width", Some("2px"))],
+    ] {
+        assert!(matches!(
+            set(&mut d, p(&[0]), b),
+            Err(EditError::InvalidTarget(_))
+        ));
+        assert_eq!(d.text(), SRC);
+    }
+}
+
+#[test]
+fn missing_bindings_inserted_in_given_order() {
+    let mut d = Document::new("m.slint".into(), SRC.into());
+    set(
+        &mut d,
+        p(&[1, 0]),
+        vec![("width", Some("1px")), ("height", Some("2px"))],
+    )
+    .unwrap();
+    assert_eq!(
+        d.text(),
+        SRC.replace(
+            r#"Button { text: "A"; }"#,
+            r#"Button { width: 1px; height: 2px; text: "A"; }"#
+        )
+    );
+}
+
+#[test]
+fn removing_missing_binding_is_noop() {
+    let mut d = Document::new("m.slint".into(), SRC.into());
+    set(&mut d, p(&[0]), vec![("width", None)]).unwrap();
+    assert_eq!(d.text(), SRC);
+    assert!(!d.is_dirty());
+}
+
+#[test]
+fn set_and_remove_in_same_call() {
+    let mut d = Document::new("m.slint".into(), SRC.into());
+    set(
+        &mut d,
+        p(&[0]),
+        vec![("x", Some("1px")), ("y", None), ("width", Some("5px"))],
+    )
+    .unwrap();
+    assert_eq!(
+        d.text(),
+        SRC.replace(r#"Text { x: 8px; y: 4px;"#, r#"Text { width: 5px; x: 1px;"#)
+    );
+}
+
+#[test]
+fn removing_own_line_binding_keeps_blank_lines() {
+    let src = "export component Main inherits Window {\n    Rectangle {\n        x: 1px;\n\n        y: 2px;\n        width: 3px;\n    }\n}\n";
+    let mut d = Document::new("m.slint".into(), src.into());
+    set(&mut d, p(&[0]), vec![("y", None)]).unwrap();
+    assert_eq!(d.text(), src.replace("        y: 2px;\n", ""));
+}

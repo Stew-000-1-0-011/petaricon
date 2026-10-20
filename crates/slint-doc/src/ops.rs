@@ -30,13 +30,27 @@ pub(crate) struct TextEdit {
 }
 
 /// Applies non-overlapping edits, back to front so offsets stay valid.
-pub(crate) fn apply_edits(text: &str, mut edits: Vec<TextEdit>) -> String {
+/// Overlapping edits are rejected with `InvalidTarget` and nothing is changed.
+/// A zero-width insert may share an offset with the start or end of another edit.
+pub(crate) fn apply_edits(text: &str, mut edits: Vec<TextEdit>) -> Result<String, EditError> {
     edits.sort_by_key(|e| (e.start, e.end));
+    for e in &edits {
+        if e.start > e.end
+            || e.end > text.len()
+            || !text.is_char_boundary(e.start)
+            || !text.is_char_boundary(e.end)
+        {
+            return Err(EditError::InvalidTarget("edit range is invalid".into()));
+        }
+    }
+    if edits.windows(2).any(|w| w[0].end > w[1].start) {
+        return Err(EditError::InvalidTarget("overlapping edits".into()));
+    }
     let mut out = text.to_string();
     for e in edits.into_iter().rev() {
         out.replace_range(e.start..e.end, &e.text);
     }
-    out
+    Ok(out)
 }
 
 fn range(node: &SyntaxNode) -> (usize, usize) {
@@ -49,6 +63,13 @@ fn set_bindings(
     element: &SyntaxNode,
     bindings: &[(String, Option<String>)],
 ) -> Result<Vec<TextEdit>, EditError> {
+    for (i, (name, _)) in bindings.iter().enumerate() {
+        if bindings[..i].iter().any(|(n, _)| n == name) {
+            return Err(EditError::InvalidTarget(format!(
+                "binding `{name}` given more than once"
+            )));
+        }
+    }
     let mut edits = Vec::new();
     let mut inserted = String::new();
     for (name, value) in bindings {
@@ -72,8 +93,16 @@ fn set_bindings(
             (Some(b), None) => {
                 let (mut start, end) = range(&b);
                 let bytes = text.as_bytes();
-                while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+                // Same-line binding: drop the spaces before it. Own-line binding: drop its
+                // indentation and exactly one preceding line break.
+                while start > 0 && matches!(bytes[start - 1], b' ' | b'\t') {
                     start -= 1;
+                }
+                if start > 0 && bytes[start - 1] == b'\n' {
+                    start -= 1;
+                    if start > 0 && bytes[start - 1] == b'\r' {
+                        start -= 1;
+                    }
                 }
                 edits.push(TextEdit {
                     start,
@@ -112,7 +141,7 @@ impl Document {
                     return Err(EditError::ElementNotFound(path));
                 };
                 let edits = set_bindings(&self.text, &element, &bindings)?;
-                (apply_edits(&self.text, edits), path)
+                (apply_edits(&self.text, edits)?, path)
             }
         };
         self.set_text(new_text);
