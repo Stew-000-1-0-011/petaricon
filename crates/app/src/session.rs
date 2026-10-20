@@ -40,7 +40,9 @@ pub enum Corner {
 /// build compiled.
 pub struct Session {
     doc: Document,
-    snapshot: Document,
+    /// The text the live instance was built from. Replaced only when the instance is.
+    snapshot: Rc<RefCell<Document>>,
+    on_instance: Option<Rc<dyn Fn()>>,
     component: String,
     live: Rc<RefCell<Option<LiveInstance>>>,
     selection: Option<ElementPath>,
@@ -68,7 +70,8 @@ impl Session {
             .unwrap_or_default();
         let snapshot = Document::new(doc.path().to_path_buf(), doc.text().to_string());
         Session {
-            snapshot,
+            snapshot: Rc::new(RefCell::new(snapshot)),
+            on_instance: None,
             doc,
             component,
             live: Rc::new(RefCell::new(None)),
@@ -101,17 +104,39 @@ impl Session {
         &self.diagnostics
     }
 
-    fn set_snapshot(&mut self) {
-        self.snapshot = Document::new(self.doc.path().to_path_buf(), self.doc.text().to_string());
+    pub fn mark_saved(&mut self) {
+        self.doc.mark_saved();
     }
 
-    /// Compiles the document; on success returns a factory whose created instance lands in `live`.
+    /// Called whenever a factory from `rebuild()` has created its instance, i.e. when the
+    /// geometry queries start answering for the new build.
+    pub fn set_on_instance(&mut self, f: impl Fn() + 'static) {
+        self.on_instance = Some(Rc::new(f));
+    }
+
+    fn snapshot_doc(&self) -> Document {
+        Document::new(self.doc.path().to_path_buf(), self.doc.text().to_string())
+    }
+
+    /// Compiles the document; on success returns a factory. The new snapshot is installed
+    /// together with the instance, when the container runs the factory, so geometry queries
+    /// always see an instance and the text it was built from.
     pub fn rebuild(&mut self) -> Option<slint::ComponentFactory> {
         match compile(self.doc.text(), self.doc.path(), &self.component) {
             Ok(c) => {
                 self.diagnostics.clear();
-                self.set_snapshot();
-                Some(c.factory(self.live.clone()))
+                let pending = self.snapshot_doc();
+                let snapshot = self.snapshot.clone();
+                let hook = self.on_instance.clone();
+                Some(c.factory_with(self.live.clone(), move || {
+                    *snapshot.borrow_mut() = Document::new(
+                        pending.path().to_path_buf(),
+                        pending.text().to_string(),
+                    );
+                    if let Some(h) = &hook {
+                        h();
+                    }
+                }))
             }
             Err(d) => {
                 self.diagnostics = d;
@@ -125,7 +150,7 @@ impl Session {
         match compile(self.doc.text(), self.doc.path(), &self.component) {
             Ok(c) => {
                 self.diagnostics.clear();
-                self.set_snapshot();
+                *self.snapshot.borrow_mut() = self.snapshot_doc();
                 *self.live.borrow_mut() = Some(c.instantiate(width, height));
                 true
             }
@@ -138,9 +163,10 @@ impl Session {
 
     pub fn tap(&mut self, x: f32, y: f32) -> Option<ElementPath> {
         let hits = self.live.borrow().as_ref()?.hits_at(x, y);
+        let snapshot = self.snapshot.borrow();
         let candidates: Vec<ElementPath> = hits
             .iter()
-            .filter_map(|h| self.snapshot.path_at_offset(h.start))
+            .filter_map(|h| snapshot.path_at_offset(h.start))
             .filter(|p| p.component == self.component)
             .collect();
         let near = self.last_tap.is_some_and(|(lx, ly)| {
@@ -160,7 +186,7 @@ impl Session {
     }
 
     pub fn selection_hit(&self) -> Option<Hit> {
-        let info = self.snapshot.element(self.selection.as_ref()?)?;
+        let info = self.snapshot.borrow().element(self.selection.as_ref()?)?;
         self.live.borrow().as_ref()?.geometry(info.start)
     }
 

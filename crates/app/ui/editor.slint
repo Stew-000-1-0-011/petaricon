@@ -1,0 +1,167 @@
+import { Canvas } from "canvas.slint";
+import { BottomPanel, ToolButton, MenuList, NewProject } from "panels.slint";
+
+export component Editor inherits Window {
+    title: "Petaricon Editor";
+    preferred-width: 480px;
+    preferred-height: 800px;
+    background: #1b1d20;
+
+    in property <component-factory> factory;
+    in property <string> error-text;
+    in property <bool> has-selection;
+    // Selection rectangle in design coordinates.
+    in property <length> sel-x;
+    in property <length> sel-y;
+    in property <length> sel-w;
+    in property <length> sel-h;
+    in property <[string]> projects;
+    in property <[string]> files;
+    in property <[string]> components;
+    in property <string> current-project;
+    in property <string> current-file;
+    in property <string> current-component;
+    in property <string> message;
+    in property <bool> dirty;
+    in property <float> zoom-level: 1.0;
+
+    callback tapped(length, length);
+    callback drag-finished(length, length);
+    callback resize-finished(int /* Corner */, length, length);
+    callback undo();
+    callback redo();
+    callback save();
+    callback open(string /* project */, string /* file */);
+    callback select-project(string);
+    callback create-project(string);
+    callback choose-component(string);
+    callback zoom(float /* multiplier */);
+
+    property <bool> menu-open;
+    property <string> menu-project: root.current-project;
+    property <bool> wide: root.width > root.height;
+    property <length> inset-top: root.safe-area-insets.top;
+    property <length> inset-bottom: root.safe-area-insets.bottom;
+    property <length> inset-left: root.safe-area-insets.left;
+    property <length> inset-right: root.safe-area-insets.right;
+    property <length> content-w: root.width - root.inset-left - root.inset-right;
+    property <length> toolbar-h: 44px;
+    property <length> band-h: (root.error-text != "" || root.message != "") ? 30px : 0px;
+    property <length> content-y: root.inset-top + root.toolbar-h + root.band-h;
+    property <length> content-h: root.height - root.content-y - root.inset-bottom;
+    in-out property <length> panel-h: 0px;
+    property <length> panel-h-eff: root.panel-h > 0px
+        ? min(root.panel-h, root.content-h * 0.7) : root.content-h * 0.4;
+    property <length> panel-w: min(root.content-w * 0.4, 360px);
+
+    Rectangle {
+        x: root.inset-left;
+        y: root.inset-top;
+        width: root.content-w;
+        height: root.toolbar-h;
+        background: #2a2e33;
+
+        HorizontalLayout {
+            padding: 4px;
+            spacing: 3px;
+            ToolButton { text: "Undo"; clicked => { root.undo(); } }
+            ToolButton { text: "Redo"; clicked => { root.redo(); } }
+            ToolButton { text: root.dirty ? "Save*" : "Save"; clicked => { root.save(); } }
+            ToolButton { text: "Tidy"; enabled: false; }
+            ToolButton { text: "Untidy"; enabled: false; }
+            ToolButton { text: "Extract"; enabled: false; }
+            ToolButton { text: "-"; min-width: 32px; clicked => { root.zoom(0.8); } }
+            ToolButton { text: "+"; min-width: 32px; clicked => { root.zoom(1.25); } }
+            ToolButton { text: "File"; clicked => { root.menu-open = true; } }
+        }
+    }
+
+    Rectangle {
+        x: root.inset-left;
+        y: root.inset-top + root.toolbar-h;
+        width: root.content-w;
+        height: root.band-h;
+        background: root.error-text != "" ? #b3261e : #2e5d34;
+        clip: true;
+        Text {
+            x: 8px;
+            width: parent.width - 16px;
+            text: root.error-text != "" ? root.error-text : root.message;
+            color: white;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    Canvas {
+        x: root.inset-left;
+        y: root.content-y;
+        width: root.wide ? root.content-w - root.panel-w : root.content-w;
+        height: root.wide ? root.content-h : root.content-h - root.panel-h-eff;
+        factory: root.factory;
+        has-selection: root.has-selection;
+        sel-x: root.sel-x;
+        sel-y: root.sel-y;
+        sel-w: root.sel-w;
+        sel-h: root.sel-h;
+        zoom: root.zoom-level;
+        tapped(x, y) => { root.tapped(x, y); }
+        drag-finished(dx, dy) => { root.drag-finished(dx, dy); }
+        resize-finished(c, dx, dy) => { root.resize-finished(c, dx, dy); }
+        zoom-by(m) => { root.zoom(m); }
+    }
+
+    BottomPanel {
+        x: root.wide ? root.inset-left + root.content-w - root.panel-w : root.inset-left;
+        y: root.wide ? root.content-y : root.content-y + root.content-h - root.panel-h-eff;
+        width: root.wide ? root.panel-w : root.content-w;
+        height: root.wide ? root.content-h : root.panel-h-eff;
+        handle-visible: !root.wide;
+        max-h: root.content-h * 0.7;
+        panel-h <=> root.panel-h;
+    }
+
+    if root.menu-open: Rectangle {
+        background: #000000a0;
+        TouchArea { clicked => { root.menu-open = false; } }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: root.inset-top + 8px;
+            width: min(parent.width - 24px, 420px);
+            height: min(parent.height - root.inset-top - root.inset-bottom - 16px, 560px);
+            background: #2a2e33;
+            border-radius: 8px;
+            // Swallow taps that land on the menu itself.
+            TouchArea { }
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+                MenuList {
+                    title: "Projects";
+                    items: root.projects;
+                    current: root.menu-project;
+                    picked(p) => { root.menu-project = p; root.select-project(p); }
+                }
+                NewProject {
+                    create(n) => { root.create-project(n); root.menu-project = n; root.select-project(n); }
+                }
+                MenuList {
+                    title: "Files";
+                    items: root.files;
+                    current: root.menu-project == root.current-project ? root.current-file : "";
+                    picked(f) => { root.menu-open = false; root.open(root.menu-project, f); }
+                }
+                MenuList {
+                    title: "Components";
+                    items: root.components;
+                    current: root.current-component;
+                    picked(c) => { root.menu-open = false; root.choose-component(c); }
+                }
+                ToolButton { text: "Close"; height: 34px; clicked => { root.menu-open = false; } }
+            }
+        }
+    }
+}

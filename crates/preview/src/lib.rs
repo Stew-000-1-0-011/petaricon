@@ -137,6 +137,16 @@ impl Compiled {
 
     /// A factory for a `ComponentContainer`; each created instance is stored in `slot`.
     pub fn factory(&self, slot: Rc<RefCell<Option<LiveInstance>>>) -> slint::ComponentFactory {
+        self.factory_with(slot, || {})
+    }
+
+    /// Like `factory`, and runs `on_created` right after the new instance is stored in `slot`
+    /// (that is when the container actually switches over to this build).
+    pub fn factory_with(
+        &self,
+        slot: Rc<RefCell<Option<LiveInstance>>>,
+        on_created: impl Fn() + 'static,
+    ) -> slint::ComponentFactory {
         let def = self.def.clone();
         let path = self.path.clone();
         let text_len = self.text_len;
@@ -147,6 +157,7 @@ impl Compiled {
                 path: path.clone(),
                 text_len,
             });
+            on_created();
             Some(inst)
         })
     }

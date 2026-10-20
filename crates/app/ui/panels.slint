@@ -1,0 +1,122 @@
+import { LineEdit, ListView } from "std-widgets.slint";
+
+export component ToolButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+    min-width: 44px;
+    background: !root.enabled ? transparent : ta.pressed ? #4a5058 : #383d44;
+    border-radius: 4px;
+    Text {
+        text: root.text;
+        color: root.enabled ? white : #777c83;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// The bottom panel: tab strip and (for now empty) content areas.
+export component BottomPanel inherits Rectangle {
+    // Height the panel is dragged to; only used in portrait.
+    in-out property <length> panel-h;
+    in property <length> max-h;
+    in property <bool> handle-visible: true;
+    in-out property <int> tab: 0;
+    property <[string]> tab-names: ["Tree", "Parts", "Props", "Source"];
+    property <length> start-y;
+    property <length> start-h;
+
+    background: #24282c;
+
+    VerticalLayout {
+        if root.handle-visible: Rectangle {
+            height: 18px;
+            background: #30353b;
+            Rectangle {
+                width: 40px;
+                height: 4px;
+                border-radius: 2px;
+                background: #6b727a;
+            }
+            TouchArea {
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.down {
+                        root.start-y = self.absolute-position.y + self.mouse-y;
+                        root.start-h = root.panel-h;
+                    }
+                }
+                moved => {
+                    root.panel-h = clamp(
+                        root.start-h - (self.absolute-position.y + self.mouse-y - root.start-y),
+                        80px, root.max-h);
+                }
+            }
+        }
+        HorizontalLayout {
+            height: 36px;
+            for name[i] in root.tab-names: Rectangle {
+                background: root.tab == i ? #3a4a5c : transparent;
+                Text {
+                    text: name;
+                    color: white;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea { clicked => { root.tab = i; } }
+            }
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            // Tab contents arrive in later milestones.
+        }
+    }
+}
+
+export component MenuList inherits Rectangle {
+    in property <string> title;
+    in property <[string]> items;
+    in property <string> current;
+    callback picked(string);
+    min-height: 90px;
+    VerticalLayout {
+        spacing: 2px;
+        Text { text: root.title; color: #9aa3ad; font-size: 12px; }
+        ListView {
+            for item in root.items: Rectangle {
+                height: 34px;
+                background: item == root.current ? #3a4a5c : transparent;
+                Text {
+                    x: 8px;
+                    text: item;
+                    color: white;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                }
+                TouchArea { clicked => { root.picked(item); } }
+            }
+        }
+    }
+}
+
+export component NewProject inherits HorizontalLayout {
+    callback create(string);
+    spacing: 6px;
+    height: 34px;
+    name := LineEdit { placeholder-text: "new project"; }
+    ToolButton {
+        text: "Create";
+        min-width: 64px;
+        clicked => {
+            if name.text != "" {
+                root.create(name.text);
+                name.text = "";
+            }
+        }
+    }
+}

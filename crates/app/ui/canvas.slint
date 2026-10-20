@@ -1,0 +1,170 @@
+// The design canvas: the live preview inside a ComponentContainer, a selection overlay,
+// and one TouchArea that decides between tap, move, resize and pan.
+
+export component Canvas inherits Rectangle {
+    in property <component-factory> factory;
+    in property <bool> has-selection;
+    // The selection rectangle in design coordinates (unscaled).
+    in property <length> sel-x;
+    in property <length> sel-y;
+    in property <length> sel-w;
+    in property <length> sel-h;
+    in property <length> design-w: 360px;
+    in property <length> design-h: 640px;
+    in property <float> zoom: 1.0;
+    in-out property <length> pan-x: 8px;
+    in-out property <length> pan-y: 8px;
+
+    // Coordinates are relative to the design origin and still scaled by `zoom`.
+    callback tapped(length, length);
+    callback drag-finished(length, length);
+    callback resize-finished(int /* Corner: 0 TL, 1 TR, 2 BL, 3 BR */, length, length);
+    // Multiplier for the current zoom (two-finger gesture).
+    callback zoom-by(float);
+
+    // 0 none, 1 move selection, 2 resize selection, 3 pan
+    property <int> mode;
+    property <int> corner;
+    property <bool> dragged;
+    property <length> drag-dx;
+    property <length> drag-dy;
+    property <length> start-pan-x;
+    property <length> start-pan-y;
+    property <float> last-scale: 1.0;
+
+    // Selection rectangle in canvas coordinates, including an in-progress drag.
+    property <length> base-x: root.pan-x + root.sel-x * root.zoom;
+    property <length> base-y: root.pan-y + root.sel-y * root.zoom;
+    property <length> base-w: root.sel-w * root.zoom;
+    property <length> base-h: root.sel-h * root.zoom;
+    property <bool> moving: root.mode == 1 && root.dragged;
+    property <bool> resizing: root.mode == 2 && root.dragged;
+    property <bool> left-moves: root.corner == 0 || root.corner == 2;
+    property <bool> top-moves: root.corner == 0 || root.corner == 1;
+    property <length> ov-x: root.moving ? root.base-x + root.drag-dx
+        : root.resizing && root.left-moves ? root.base-x + root.drag-dx : root.base-x;
+    property <length> ov-y: root.moving ? root.base-y + root.drag-dy
+        : root.resizing && root.top-moves ? root.base-y + root.drag-dy : root.base-y;
+    property <length> ov-w: root.resizing
+        ? max(4px, root.base-w + (root.left-moves ? -root.drag-dx : root.drag-dx)) : root.base-w;
+    property <length> ov-h: root.resizing
+        ? max(4px, root.base-h + (root.top-moves ? -root.drag-dy : root.drag-dy)) : root.base-h;
+
+    function corner-at(px: length, py: length) -> int {
+        if !root.has-selection { return -1; }
+        if abs(px - root.base-x) < 24px && abs(py - root.base-y) < 24px { return 0; }
+        if abs(px - (root.base-x + root.base-w)) < 24px && abs(py - root.base-y) < 24px { return 1; }
+        if abs(px - root.base-x) < 24px && abs(py - (root.base-y + root.base-h)) < 24px { return 2; }
+        if abs(px - (root.base-x + root.base-w)) < 24px && abs(py - (root.base-y + root.base-h)) < 24px { return 3; }
+        return -1;
+    }
+
+    function inside-selection(px: length, py: length) -> bool {
+        root.has-selection && px >= root.base-x && px <= root.base-x + root.base-w
+            && py >= root.base-y && py <= root.base-y + root.base-h
+    }
+
+    background: #2b2f34;
+    clip: true;
+
+    Rectangle {
+        x: root.pan-x;
+        y: root.pan-y;
+        width: root.design-w;
+        height: root.design-h;
+        transform-scale: root.zoom;
+        transform-origin: { x: 0px, y: 0px };
+        background: white;
+
+        ComponentContainer {
+            width: parent.width;
+            height: parent.height;
+            component-factory: root.factory;
+        }
+    }
+
+    if root.has-selection: Rectangle {
+        x: root.ov-x;
+        y: root.ov-y;
+        width: root.ov-w;
+        height: root.ov-h;
+        border-width: 2px;
+        border-color: #e020e0;
+        background: #e020e020;
+
+        for c in [0, 1, 2, 3]: Rectangle {
+            x: (c == 1 || c == 3) ? parent.width - self.width / 2 : -self.width / 2;
+            y: (c == 2 || c == 3) ? parent.height - self.height / 2 : -self.height / 2;
+            width: 14px;
+            height: 14px;
+            background: white;
+            border-width: 2px;
+            border-color: #e020e0;
+        }
+    }
+
+    gesture := ScaleRotateGestureHandler {
+        width: parent.width;
+        height: parent.height;
+        started => { root.last-scale = 1.0; }
+        updated => {
+            root.zoom-by(self.scale / root.last-scale);
+            root.last-scale = self.scale;
+        }
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    root.dragged = false;
+                    root.drag-dx = 0;
+                    root.drag-dy = 0;
+                    root.start-pan-x = root.pan-x;
+                    root.start-pan-y = root.pan-y;
+                    root.corner = root.corner-at(self.mouse-x, self.mouse-y);
+                    if root.corner >= 0 {
+                        root.mode = 2;
+                    } else if root.inside-selection(self.mouse-x, self.mouse-y) {
+                        root.mode = 1;
+                    } else {
+                        root.mode = 3;
+                    }
+                } else if e.kind == PointerEventKind.up {
+                    if root.mode != 0 {
+                        if !root.dragged {
+                            root.tapped(self.mouse-x - root.pan-x, self.mouse-y - root.pan-y);
+                        } else if root.mode == 1 {
+                            root.drag-finished(root.drag-dx, root.drag-dy);
+                        } else if root.mode == 2 {
+                            root.resize-finished(root.corner, root.drag-dx, root.drag-dy);
+                        }
+                    }
+                    root.mode = 0;
+                    root.dragged = false;
+                    root.drag-dx = 0;
+                    root.drag-dy = 0;
+                } else if e.kind == PointerEventKind.cancel {
+                    root.mode = 0;
+                    root.dragged = false;
+                    root.drag-dx = 0;
+                    root.drag-dy = 0;
+                    root.pan-x = root.start-pan-x;
+                    root.pan-y = root.start-pan-y;
+                }
+            }
+            moved => {
+                if root.mode == 0 { return; }
+                root.drag-dx = self.mouse-x - self.pressed-x;
+                root.drag-dy = self.mouse-y - self.pressed-y;
+                if abs(root.drag-dx) > 6px || abs(root.drag-dy) > 6px {
+                    root.dragged = true;
+                }
+                if root.mode == 3 && root.dragged {
+                    root.pan-x = root.start-pan-x + root.drag-dx;
+                    root.pan-y = root.start-pan-y + root.drag-dy;
+                }
+            }
+        }
+    }
+}

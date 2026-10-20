@@ -191,3 +191,37 @@ fn resize_keeps_four_px_minimum() {
         "{t}"
     );
 }
+
+#[test]
+fn rebuild_swaps_snapshot_only_when_the_factory_runs() {
+    use slint::ComponentHandle;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let mut s = session();
+    s.tap(60., 60.);
+    let before = s.selection_hit().unwrap().local;
+    let created = Rc::new(Cell::new(0));
+    let c = created.clone();
+    s.set_on_instance(move || c.set(c.get() + 1));
+
+    s.move_selection(40., 40.).unwrap();
+    let factory = s.rebuild().expect("compiles");
+    // The container has not run the factory yet: the old instance and the text it was
+    // built from are still what geometry queries see.
+    assert_eq!(s.selection_hit().unwrap().local, before);
+    assert_eq!(created.get(), 0);
+
+    let editor = app::Editor::new().unwrap();
+    editor.set_factory(factory);
+    editor.window().set_size(slint::LogicalSize::new(480., 800.));
+    editor.show().unwrap();
+    slint::platform::update_timers_and_animations();
+    // Force layout evaluation of the container.
+    let _ = editor.window().size();
+
+    assert_eq!(created.get(), 1, "the factory ran once");
+    let after = s.selection_hit().unwrap().local;
+    // 10 + 40 snapped to the 4px grid.
+    assert_eq!((after.x, after.y), (52., 52.));
+}
