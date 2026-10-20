@@ -214,20 +214,97 @@ fn remove_for_and_if_wrappers() {
 }
 
 #[test]
-fn move_for_and_id_wrappers_into_layout() {
+fn move_for_wrapper_into_layout() {
     let mut d = doc3();
     let r = d
         .apply(Op::MoveElement { path: p(&[0, 1]), new_parent: p(&[1]), index: Some(0) })
         .unwrap();
     assert_eq!(r, Some(p(&[1, 0])));
-    assert!(d.text().contains(
-        "    VerticalLayout {\n        for i in 3: Rectangle { width: 5px; }\n        b := Text {"
-    ));
-    assert!(!d.text().contains("y: 2px"));
+    assert_eq!(
+        d.text(),
+        SRC3.replace("        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n", "")
+            .replace(
+                "    VerticalLayout {\n",
+                "    VerticalLayout {\n        for i in 3: Rectangle { width: 5px; }\n"
+            )
+    );
 }
 
 #[test]
-fn move_id_wrapper_keeps_id_and_strips_xy() {
+fn move_id_into_layout_keeps_id_strips_xy() {
+    let src = "export component Main inherits Window {
+    Rectangle {
+        box := Rectangle { x: 1px; y: 2px; width: 5px; }
+    }
+    VerticalLayout {
+        Text { }
+    }
+}
+";
+    let mut d = Document::new("m.slint".into(), src.into());
+    let r = d
+        .apply(Op::MoveElement { path: p(&[0, 0]), new_parent: p(&[1]), index: None })
+        .unwrap();
+    assert_eq!(r, Some(p(&[1, 1])));
+    assert_eq!(
+        d.text(),
+        "export component Main inherits Window {
+    Rectangle {
+    }
+    VerticalLayout {
+        Text { }
+        box := Rectangle { width: 5px; }
+    }
+}
+"
+    );
+    assert_eq!(d.element(&p(&[1, 1])).unwrap().id.as_deref(), Some("box"));
+}
+
+#[test]
+fn move_multiline_with_comment_between_indent_levels() {
+    // The closing brace is deliberately misindented: indentation must come from the line
+    // where the element (with its comment) starts, not from where it ends.
+    let src = "export component Main inherits Window {
+    Rectangle {
+        // note
+        Rectangle {
+            width: 5px;
+    }
+    }
+    Rectangle {
+        Rectangle {
+            Text { }
+        }
+    }
+}
+";
+    let mut d = Document::new("m.slint".into(), src.into());
+    let r = d
+        .apply(Op::MoveElement { path: p(&[0, 0]), new_parent: p(&[1, 0]), index: None })
+        .unwrap();
+    assert_eq!(r, Some(p(&[1, 0, 1])));
+    assert_eq!(
+        d.text(),
+        "export component Main inherits Window {
+    Rectangle {
+    }
+    Rectangle {
+        Rectangle {
+            Text { }
+            // note
+            Rectangle {
+                width: 5px;
+                }
+        }
+    }
+}
+"
+    );
+}
+
+#[test]
+fn move_id_out_of_layout_keeps_xy() {
     let mut d = doc3();
     // Out of the layout into a free container: text kept intact (x stays).
     let r = d
@@ -284,9 +361,13 @@ fn noop_move_and_adjacent_swap() {
         .apply(Op::MoveElement { path: p(&[0, 1]), new_parent: p(&[0]), index: Some(0) })
         .unwrap();
     assert_eq!(r, Some(p(&[0, 0])));
-    assert!(d.text().contains(
-        "    Rectangle {\n        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n        Text { text: \"a\"; }\n        if root"
-    ));
+    assert_eq!(
+        d.text(),
+        SRC3.replace(
+            "        Text { text: \"a\"; }\n        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n",
+            "        for i in 3: Rectangle { x: 1px; y: 2px; width: 5px; }\n        Text { text: \"a\"; }\n"
+        )
+    );
 }
 
 #[test]
