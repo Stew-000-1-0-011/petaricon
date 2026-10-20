@@ -1,6 +1,6 @@
 //! Text-level edit operations on a document.
 
-use crate::{Document, ElementPath, syntax};
+use crate::{Document, ElementPath, LayoutKind, syntax};
 use i_slint_compiler::parser::{SyntaxKind, SyntaxNode};
 
 /// An edit applied through [`Document::apply`].
@@ -28,6 +28,29 @@ pub enum Op {
         new_parent: ElementPath,
         index: Option<usize>,
     },
+    /// Moves all children of `container` into a new layout element, in `layout.order`, dropping
+    /// their `x` / `y`. The layout takes the place of the first child. Returns the layout's path.
+    WrapInLayout {
+        container: ElementPath,
+        layout: LayoutSpec,
+    },
+    /// Replaces a layout by its children, in order, giving each the `x` / `y` from `positions`.
+    /// Returns the parent's path.
+    Unwrap {
+        layout: ElementPath,
+        positions: Vec<(i32, i32)>,
+    },
+}
+
+/// Description of the layout created by [`Op::WrapInLayout`].
+#[derive(Debug, Clone)]
+pub struct LayoutSpec {
+    /// Only `Horizontal` and `Vertical` are valid.
+    pub kind: LayoutKind,
+    /// A permutation of all child indices of the container.
+    pub order: Vec<usize>,
+    /// Bindings written on the layout, one line each, in this order.
+    pub bindings: Vec<(String, String)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -300,6 +323,61 @@ fn insert_edit(
     })
 }
 
+/// Text of a child (with attached comments) re-indented to `to_indent`, after applying
+/// `bindings` to its element.
+fn child_block(
+    text: &str,
+    wrapper: &SyntaxNode,
+    bindings: &[(String, Option<String>)],
+    to_indent: &str,
+) -> Result<String, EditError> {
+    let element = syntax::inner_element(wrapper)
+        .ok_or_else(|| EditError::InvalidTarget("child has no element".into()))?;
+    let ext = extent(text, wrapper);
+    let from_indent = if ext.line_mode {
+        syntax::line_indent(text, ext.start)
+    } else {
+        String::new()
+    };
+    let edits = set_bindings(text, &element, bindings)?
+        .into_iter()
+        .map(|e| TextEdit {
+            start: e.start - ext.start,
+            end: e.end - ext.start,
+            text: e.text,
+        })
+        .collect();
+    let moved = apply_edits(&text[ext.start..ext.end], edits)?;
+    Ok(reindent(&moved, &from_indent, to_indent))
+}
+
+fn plain_children(element: &SyntaxNode) -> Result<Vec<SyntaxNode>, EditError> {
+    let children = syntax::element_children(element);
+    if children.iter().any(|c| c.kind() != SyntaxKind::SubElement) {
+        return Err(EditError::InvalidTarget(
+            "repeated or conditional children cannot be moved into or out of a layout".into(),
+        ));
+    }
+    Ok(children)
+}
+
+/// Replacement for the removed range of `first` (see [`Extent::remove`]) holding `block`.
+fn replace_extent(text: &str, first: &SyntaxNode, block: String) -> TextEdit {
+    let ext = extent(text, first);
+    let text = if block.is_empty() {
+        String::new()
+    } else if ext.line_mode {
+        format!("\n{block}")
+    } else {
+        format!(" {}", block.trim_start())
+    };
+    TextEdit {
+        start: ext.remove.0,
+        end: ext.remove.1,
+        text,
+    }
+}
+
 fn resolve_in(
     root: &SyntaxNode,
     path: &ElementPath,
@@ -436,6 +514,104 @@ impl Document {
                         indices,
                     }),
                 )
+            }
+            Op::WrapInLayout { container, layout } => {
+                let (_, element) = resolve_in(&root, &container)?;
+                let type_name = match layout.kind {
+                    LayoutKind::Horizontal => "HorizontalLayout",
+                    LayoutKind::Vertical => "VerticalLayout",
+                    _ => {
+                        return Err(EditError::InvalidTarget(
+                            "layout kind must be Horizontal or Vertical".into(),
+                        ));
+                    }
+                };
+                let children = syntax::element_children(&element);
+                if children.is_empty() {
+                    return Err(EditError::InvalidTarget("container has no children".into()));
+                }
+                let children = plain_children(&element)?;
+                let mut seen = vec![false; children.len()];
+                for &i in &layout.order {
+                    if i >= children.len() || std::mem::replace(&mut seen[i], true) {
+                        return Err(EditError::InvalidTarget(
+                            "order is not a permutation of the children".into(),
+                        ));
+                    }
+                }
+                if layout.order.len() != children.len() {
+                    return Err(EditError::InvalidTarget(
+                        "order is not a permutation of the children".into(),
+                    ));
+                }
+                let indent = syntax::child_indent(&self.text, &element);
+                let inner = format!("{indent}    ");
+                let strip = [("x".to_string(), None), ("y".to_string(), None)];
+                let mut lines = vec![format!("{indent}{type_name} {{")];
+                for (name, value) in &layout.bindings {
+                    lines.push(format!("{inner}{name}: {value};"));
+                }
+                for &i in &layout.order {
+                    lines.push(child_block(&self.text, &children[i], &strip, &inner)?);
+                }
+                lines.push(format!("{indent}}}"));
+                let mut edits = vec![replace_extent(&self.text, &children[0], lines.join("\n"))];
+                for c in &children[1..] {
+                    let (start, end) = extent(&self.text, c).remove;
+                    edits.push(TextEdit {
+                        start,
+                        end,
+                        text: String::new(),
+                    });
+                }
+                let mut indices = container.indices.clone();
+                indices.push(0);
+                (
+                    apply_edits(&self.text, edits)?,
+                    Some(ElementPath {
+                        component: container.component,
+                        indices,
+                    }),
+                )
+            }
+            Op::Unwrap { layout, positions } => {
+                let (wrapper, element) = resolve_in(&root, &layout)?;
+                let wrapper = wrapper.ok_or_else(|| {
+                    EditError::InvalidTarget("the component root cannot be unwrapped".into())
+                })?;
+                if crate::layout_kind(&crate::type_name(&element)).is_none() {
+                    return Err(EditError::InvalidTarget("element is not a layout".into()));
+                }
+                if wrapper.kind() != SyntaxKind::SubElement {
+                    return Err(EditError::InvalidTarget(
+                        "repeated or conditional layouts cannot be unwrapped".into(),
+                    ));
+                }
+                let mut parent_path = layout.clone();
+                parent_path.indices.pop();
+                let (_, parent) = resolve_in(&root, &parent_path)?;
+                if crate::layout_kind(&crate::type_name(&parent)).is_some() {
+                    return Err(EditError::InvalidTarget(
+                        "the parent is a layout; its children cannot take x / y".into(),
+                    ));
+                }
+                let children = plain_children(&element)?;
+                if children.len() != positions.len() {
+                    return Err(EditError::InvalidTarget(
+                        "positions must match the number of children".into(),
+                    ));
+                }
+                let indent = syntax::child_indent(&self.text, &parent);
+                let mut blocks = Vec::new();
+                for (c, (px, py)) in children.iter().zip(&positions) {
+                    let set = [
+                        ("x".to_string(), Some(format!("{px}px"))),
+                        ("y".to_string(), Some(format!("{py}px"))),
+                    ];
+                    blocks.push(child_block(&self.text, c, &set, &indent)?);
+                }
+                let edit = replace_extent(&self.text, &wrapper, blocks.join("\n"));
+                (apply_edits(&self.text, vec![edit])?, Some(parent_path))
             }
         };
         self.set_text(new_text);

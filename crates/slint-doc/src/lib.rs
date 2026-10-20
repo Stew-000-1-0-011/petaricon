@@ -4,7 +4,7 @@ mod history;
 mod ops;
 mod syntax;
 
-pub use ops::{EditError, Op};
+pub use ops::{EditError, LayoutSpec, Op};
 
 use i_slint_compiler::parser::{SyntaxKind, SyntaxNode};
 use std::path::{Path, PathBuf};
