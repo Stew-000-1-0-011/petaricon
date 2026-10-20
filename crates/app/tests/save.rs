@@ -145,9 +145,86 @@ fn recovery_tick_skips_unloaded_and_pending_recovery_ignores_equal_text() {
     s.replace_text("x".into());
     let mut last = None;
     assert_eq!(recovery_tick(&store, "p", "main.slint", &s, false, &mut last), Ok(false));
-    assert_eq!(pending_recovery(&store, "p", "main.slint", SRC), None);
+    assert_eq!(pending_recovery(&store, "p", "main.slint", SRC), Ok(None));
     store.write_recovery("p", "main.slint", SRC).unwrap();
-    assert_eq!(pending_recovery(&store, "p", "main.slint", SRC), None);
+    assert_eq!(pending_recovery(&store, "p", "main.slint", SRC), Ok(None));
+    assert_eq!(store.take_recovery("p", "main.slint").unwrap(), None, "equal copy is cleared");
     store.write_recovery("p", "main.slint", "draft").unwrap();
-    assert_eq!(pending_recovery(&store, "p", "main.slint", SRC).as_deref(), Some("draft"));
+    assert_eq!(
+        pending_recovery(&store, "p", "main.slint", SRC),
+        Ok(Some("draft".to_string()))
+    );
+}
+
+fn glue_editor(store: LocalStore) -> app::Editor {
+    i_slint_backend_testing::init_no_event_loop();
+    let editor = app::Editor::new().unwrap();
+    app::glue::start(&editor, Box::new(store)).unwrap();
+    editor.window().set_size(slint::LogicalSize::new(480., 800.));
+    editor.show().unwrap();
+    slint::platform::update_timers_and_animations();
+    editor
+}
+
+fn two_files() -> (tempfile::TempDir, LocalStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LocalStore::new(dir.path().to_path_buf()).unwrap();
+    store.create_project("default").unwrap();
+    store.write("default", "main.slint", SRC).unwrap();
+    store.write("default", "other.slint", SRC).unwrap();
+    (dir, store)
+}
+
+fn read_back(dir: &tempfile::TempDir, f: &str) -> String {
+    LocalStore::new(dir.path().to_path_buf())
+        .unwrap()
+        .read("default", f)
+        .unwrap()
+}
+
+#[test]
+fn stale_recovery_of_another_file_does_not_prompt_on_open() {
+    let (dir, store) = two_files();
+    let editor = glue_editor(store);
+    assert!(!editor.get_recovery_open());
+    // A stale copy for main.slint appears; opening other.slint must not prompt about it.
+    let s = LocalStore::new(dir.path().to_path_buf()).unwrap();
+    s.write_recovery("default", "main.slint", "// stale\n").unwrap();
+    editor.invoke_open("default".into(), "other.slint".into());
+    assert_eq!(editor.get_current_file().as_str(), "other.slint");
+    assert!(!editor.get_recovery_open());
+    assert!(!editor.get_dirty());
+    assert_eq!(read_back(&dir, "other.slint"), SRC);
+}
+
+#[test]
+fn recovery_prompt_no_clears_copy_and_keeps_text() {
+    let (dir, store) = two_files();
+    store.write_recovery("default", "other.slint", "// draft\n").unwrap();
+    let editor = glue_editor(store);
+    assert!(!editor.get_recovery_open());
+    editor.invoke_open("default".into(), "other.slint".into());
+    assert!(editor.get_recovery_open());
+    editor.invoke_recovery_answered(false);
+    assert!(!editor.get_recovery_open());
+    assert!(!editor.get_dirty());
+    let s = LocalStore::new(dir.path().to_path_buf()).unwrap();
+    assert_eq!(s.take_recovery("default", "other.slint").unwrap(), None);
+    assert_eq!(read_back(&dir, "other.slint"), SRC);
+}
+
+#[test]
+fn recovery_prompt_yes_replaces_text_and_marks_dirty_without_touching_file() {
+    let (dir, store) = two_files();
+    let draft = SRC.replace("300px", "250px");
+    store.write_recovery("default", "other.slint", &draft).unwrap();
+    let editor = glue_editor(store);
+    editor.invoke_open("default".into(), "other.slint".into());
+    assert!(editor.get_recovery_open());
+    editor.invoke_recovery_answered(true);
+    assert!(!editor.get_recovery_open());
+    assert!(editor.get_dirty());
+    assert_eq!(read_back(&dir, "other.slint"), SRC, "file untouched until saved");
+    editor.invoke_save();
+    assert_eq!(read_back(&dir, "other.slint"), draft);
 }

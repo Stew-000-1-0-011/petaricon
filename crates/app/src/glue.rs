@@ -110,16 +110,22 @@ pub fn recovery_tick(
     Ok(true)
 }
 
-/// The recovery copy of `file`, when one exists and differs from the file's text.
+/// The recovery copy of `file`, when one exists and differs from the file's text. A copy
+/// equal to the file's text is removed.
 pub fn pending_recovery(
     store: &dyn ProjectStore,
     project: &str,
     file: &str,
     file_text: &str,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     match store.take_recovery(project, file) {
-        Ok(Some(r)) if r != file_text => Some(r),
-        _ => None,
+        Ok(Some(r)) if r != file_text => Ok(Some(r)),
+        Ok(Some(_)) => store
+            .clear_recovery(project, file)
+            .map(|()| None)
+            .map_err(|e| format!("Recovery copy not removed: {e}")),
+        Ok(None) => Ok(None),
+        Err(e) => Err(format!("Recovery copy not read: {e}")),
     }
 }
 
@@ -147,8 +153,8 @@ pub struct Glue {
     last_recovery: Option<String>,
     /// A recovery write failed and was reported; stay quiet until one succeeds.
     recovery_failed: bool,
-    /// Recovery text waiting for the user's answer.
-    recovered: Option<String>,
+    /// `(project, file, text)` of a recovery copy waiting for the user's answer.
+    recovered: Option<(String, String, String)>,
     /// Name of the component just extracted; declarations are added to it.
     extracted: String,
     guide_target: RefCell<Option<slint_doc::ElementPath>>,
@@ -485,6 +491,7 @@ impl Glue {
         );
         let ok = match r {
             Ok(_) => {
+                self.last_recovery = None;
                 ed.set_message("Saved".into());
                 true
             }
@@ -680,23 +687,36 @@ impl Glue {
         if !self.loaded {
             return;
         }
-        self.recovered = pending_recovery(
+        self.recovered = match pending_recovery(
             &*self.store,
             &self.project,
             &self.file,
             self.session.doc().text(),
-        );
+        ) {
+            Ok(r) => r.map(|t| (self.project.clone(), self.file.clone(), t)),
+            Err(e) => {
+                self.set_error(&e);
+                None
+            }
+        };
         self.editor().set_recovery_open(self.recovered.is_some());
     }
 
     fn recovery_answered(&mut self, restore: bool) {
         self.editor().set_recovery_open(false);
-        let Some(text) = self.recovered.take() else { return };
+        let Some((project, file, text)) = self.recovered.take() else { return };
         if restore {
-            self.session.replace_text(text);
+            if (project.as_str(), file.as_str()) != (self.project.as_str(), self.file.as_str()) {
+                return;
+            }
+            self.flush_prop();
+            self.discard_source_edits();
+            self.session.replace_text(text.clone());
+            self.last_recovery = Some(text);
             self.refresh_lists();
+            self.editor().set_has_selection(false);
             self.rebuild();
-        } else if let Err(e) = self.store.clear_recovery(&self.project, &self.file) {
+        } else if let Err(e) = self.store.clear_recovery(&project, &file) {
             self.set_error(&format!("Recovery copy not removed: {e}"));
         }
     }
@@ -748,6 +768,7 @@ impl Glue {
         self.editor().set_message("".into());
         match self.session.extract_selection(name) {
             Ok(()) => {
+                self.discard_source_edits();
                 self.extracted = name.to_string();
                 self.refresh_lists();
                 self.rebuild();
