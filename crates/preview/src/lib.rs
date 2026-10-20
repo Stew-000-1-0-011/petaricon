@@ -6,15 +6,17 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
-use i_slint_compiler::object_tree::ElementRc;
 use i_slint_compiler::langtype::ElementType;
+use i_slint_compiler::object_tree::ElementRc;
 use i_slint_compiler::parser::SyntaxKind;
-use slint_interpreter::highlight::HighlightedRect;
 use slint::ComponentHandle;
+use slint_interpreter::highlight::HighlightedRect;
 use slint_interpreter::{ComponentDefinition, ComponentInstance, DiagnosticLevel};
 use tidy::Rect;
 
 const WRAPPER_NAME: &str = "__PetariconPreviewRoot";
+/// `WRAPPER_NAME` as Slint normalizes it (`__` becomes `_-`).
+const WRAPPER_NORMALIZED: &str = "_-PetariconPreviewRoot";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Diagnostic {
@@ -58,7 +60,12 @@ fn kids(e: &ElementRc) -> Vec<ElementRc> {
 }
 
 fn to_rect(r: &i_slint_core::lengths::LogicalRect) -> Rect {
-    Rect { x: r.origin.x, y: r.origin.y, w: r.size.width, h: r.size.height }
+    Rect {
+        x: r.origin.x,
+        y: r.origin.y,
+        w: r.size.width,
+        h: r.size.height,
+    }
 }
 
 fn line_col_to_offset(text: &str, line: usize, column: usize) -> Option<usize> {
@@ -72,12 +79,12 @@ fn line_col_to_offset(text: &str, line: usize, column: usize) -> Option<usize> {
     let rest = &text[line_start..];
     let line_end = rest.find('\n').unwrap_or(rest.len());
     let line_text = &rest[..line_end];
-    let col = column.saturating_sub(1);
-    match line_text.char_indices().nth(col) {
-        Some((i, _)) => Some(line_start + i),
-        None if col == line_text.chars().count() => Some(line_start + line_text.len()),
-        None => None,
+    // `column` is a 1-based byte column.
+    let mut col = column.saturating_sub(1).min(line_text.len());
+    while !line_text.is_char_boundary(col) {
+        col -= 1;
     }
+    Some(line_start + col)
 }
 
 pub fn compile(text: &str, path: &Path, component: &str) -> Result<Compiled, Vec<Diagnostic>> {
@@ -96,25 +103,36 @@ pub fn compile(text: &str, path: &Path, component: &str) -> Result<Compiled, Vec
             let offset = line_col_to_offset(&full, line, col)
                 .filter(|&o| o < text.len())
                 .map(|o| o as u32);
-            Diagnostic { message: d.message().to_string(), offset }
+            Diagnostic {
+                message: d.message().to_string(),
+                offset,
+            }
         })
         .collect();
     if !errors.is_empty() {
         return Err(errors);
     }
-    // Slint normalizes `__` in identifiers to `_-`, so look the wrapper up by its tail.
-    let wrapper = result.component_names().find(|n| n.ends_with("PetariconPreviewRoot")).map(str::to_string);
-    match wrapper.and_then(|n| result.component(&n)) {
-        Some(def) => {
-            Ok(Compiled { compile_ms, def, path: path.to_path_buf(), text_len: text.len() as u32 })
-        }
-        None => Err(vec![Diagnostic { message: format!("component `{component}` not found"), offset: None }]),
+    match result.component(WRAPPER_NORMALIZED) {
+        Some(def) => Ok(Compiled {
+            compile_ms,
+            def,
+            path: path.to_path_buf(),
+            text_len: text.len() as u32,
+        }),
+        None => Err(vec![Diagnostic {
+            message: format!("component `{component}` not found"),
+            offset: None,
+        }]),
     }
 }
 
 impl Compiled {
     fn live(&self, inst: ComponentInstance) -> LiveInstance {
-        LiveInstance { inst: Rc::new(inst), path: self.path.clone(), text_len: self.text_len }
+        LiveInstance {
+            inst: Rc::new(inst),
+            path: self.path.clone(),
+            text_len: self.text_len,
+        }
     }
 
     /// A factory for a `ComponentContainer`; each created instance is stored in `slot`.
@@ -136,7 +154,8 @@ impl Compiled {
     /// A standalone instance sized `width` x `height` (for tests).
     pub fn instantiate(&self, width: f32, height: f32) -> LiveInstance {
         let inst = self.def.create().expect("create preview instance");
-        inst.window().set_size(slint::LogicalSize::new(width, height));
+        inst.window()
+            .set_size(slint::LogicalSize::new(width, height));
         self.live(inst)
     }
 }
@@ -146,14 +165,20 @@ impl LiveInstance {
         let elem = e.borrow();
         let dbg = elem.debug.iter().find(|d| {
             d.node.source_file.path() == self.path
-                && d.node.parent().is_some_and(|p| p.kind() != SyntaxKind::Component)
+                && d.node
+                    .parent()
+                    .is_some_and(|p| p.kind() != SyntaxKind::Component)
                 && u32::from(d.node.text_range().start()) < self.text_len
         })?;
         Some(u32::from(dbg.node.text_range().start()))
     }
 
     fn hit_for(rect: &HighlightedRect, start: u32) -> Hit {
-        Hit { start, rect: to_rect(&rect.rect), local: to_rect(&rect.local_rect) }
+        Hit {
+            start,
+            rect: to_rect(&rect.rect),
+            local: to_rect(&rect.local_rect),
+        }
     }
 
     fn root(&self) -> ElementRc {
@@ -162,7 +187,12 @@ impl LiveInstance {
 
     pub fn hits_at(&self, x: f32, y: f32) -> Vec<Hit> {
         let p = i_slint_core::lengths::LogicalPoint::new(x, y);
-        fn walk(li: &LiveInstance, e: &ElementRc, p: i_slint_core::lengths::LogicalPoint, depth: usize) -> Option<Vec<Hit>> {
+        fn walk(
+            li: &LiveInstance,
+            e: &ElementRc,
+            p: i_slint_core::lengths::LogicalPoint,
+            depth: usize,
+        ) -> Option<Vec<Hit>> {
             for c in &kids(e) {
                 if let Some(mut chain) = walk(li, c, p, depth + 1) {
                     if depth > 0 {
@@ -189,7 +219,11 @@ impl LiveInstance {
 
     fn own_hit(&self, e: &ElementRc, p: i_slint_core::lengths::LogicalPoint) -> Option<Hit> {
         let start = self.own_start(e)?;
-        let rect = self.inst.element_positions(e).into_iter().find(|r| r.contains(p))?;
+        let rect = self
+            .inst
+            .element_positions(e)
+            .into_iter()
+            .find(|r| r.contains(p))?;
         Some(Self::hit_for(&rect, start))
     }
 
