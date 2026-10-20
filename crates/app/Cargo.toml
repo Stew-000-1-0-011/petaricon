@@ -1,0 +1,17 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2"] }
+slint-doc = { path = "../slint-doc" }
+preview = { path = "../preview" }
+tidy = { path = "../tidy" }
+thiserror = "2"
+
+[dev-dependencies]
+i-slint-backend-testing = "=1.18.1"
