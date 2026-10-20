@@ -1,6 +1,10 @@
 //! Read model of a `.slint` document: components, element tree and element info.
 
+mod history;
+mod ops;
 mod syntax;
+
+pub use ops::{EditError, Op};
 
 use i_slint_compiler::parser::{SyntaxKind, SyntaxNode};
 use std::path::{Path, PathBuf};
@@ -66,6 +70,7 @@ pub struct ComponentInfo {
 pub struct Document {
     path: PathBuf,
     text: String,
+    history: history::History,
 }
 
 fn type_name(element: &SyntaxNode) -> String {
@@ -157,7 +162,51 @@ fn build_tree(path: ElementPath, child: Option<&SyntaxNode>, element: &SyntaxNod
 
 impl Document {
     pub fn new(path: PathBuf, text: String) -> Self {
-        Self { path, text }
+        let history = history::History::new(text.clone());
+        Self {
+            path,
+            text,
+            history,
+        }
+    }
+
+    /// Replaces the whole text (one undo step); unchanged text is not recorded.
+    pub fn replace_text(&mut self, text: String) {
+        self.set_text(text);
+    }
+
+    pub(crate) fn set_text(&mut self, text: String) {
+        if self.history.push(text.clone()) {
+            self.text = text;
+        }
+    }
+
+    pub fn undo(&mut self) -> bool {
+        match self.history.undo() {
+            Some(t) => {
+                self.text = t.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn redo(&mut self) -> bool {
+        match self.history.redo() {
+            Some(t) => {
+                self.text = t.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.history.is_dirty()
+    }
+
+    pub fn mark_saved(&mut self) {
+        self.history.mark_saved();
     }
 
     pub fn text(&self) -> &str {
