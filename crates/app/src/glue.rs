@@ -18,6 +18,7 @@ const DEFAULT_PROJECT: &str = "default";
 const DEFAULT_FILE: &str = "main.slint";
 const PROP_DEBOUNCE: Duration = Duration::from_millis(300);
 const SOURCE_TAB: i32 = 3;
+const RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const TOAST_TIME: Duration = Duration::from_secs(3);
 
 thread_local! {
@@ -75,6 +76,53 @@ pub fn save_if_dirty(
     Ok(true)
 }
 
+/// One recovery-timer tick. A dirty, loaded document whose text differs from the last
+/// recovery write is written to the recovery copy; a document back at its saved state drops
+/// the copy this session wrote. `Ok(true)` means the recovery copy was written.
+pub fn recovery_tick(
+    store: &dyn ProjectStore,
+    project: &str,
+    file: &str,
+    session: &Session,
+    loaded: bool,
+    last: &mut Option<String>,
+) -> Result<bool, String> {
+    if !loaded {
+        return Ok(false);
+    }
+    if !session.doc().is_dirty() {
+        if last.is_some() {
+            store
+                .clear_recovery(project, file)
+                .map_err(|e| format!("Recovery copy not removed: {e}"))?;
+            *last = None;
+        }
+        return Ok(false);
+    }
+    let text = session.doc().text();
+    if last.as_deref() == Some(text) {
+        return Ok(false);
+    }
+    store
+        .write_recovery(project, file, text)
+        .map_err(|e| format!("Recovery copy not written: {e}"))?;
+    *last = Some(text.to_string());
+    Ok(true)
+}
+
+/// The recovery copy of `file`, when one exists and differs from the file's text.
+pub fn pending_recovery(
+    store: &dyn ProjectStore,
+    project: &str,
+    file: &str,
+    file_text: &str,
+) -> Option<String> {
+    match store.take_recovery(project, file) {
+        Ok(Some(r)) if r != file_text => Some(r),
+        _ => None,
+    }
+}
+
 pub struct Glue {
     editor: slint::Weak<Editor>,
     store: Box<dyn ProjectStore>,
@@ -94,6 +142,15 @@ pub struct Glue {
     source_dirty: bool,
     prop_timer: slint::Timer,
     toast_timer: slint::Timer,
+    recovery_timer: slint::Timer,
+    /// Text of the last recovery write (None: nothing written for this document yet).
+    last_recovery: Option<String>,
+    /// A recovery write failed and was reported; stay quiet until one succeeds.
+    recovery_failed: bool,
+    /// Recovery text waiting for the user's answer.
+    recovered: Option<String>,
+    /// Name of the component just extracted; declarations are added to it.
+    extracted: String,
     guide_target: RefCell<Option<slint_doc::ElementPath>>,
 }
 
@@ -404,9 +461,11 @@ impl Glue {
                 self.file = file.to_string();
                 self.session = session;
                 self.loaded = true;
+                self.last_recovery = None;
                 self.refresh_lists();
                 self.editor().set_has_selection(false);
                 self.rebuild();
+                self.check_recovery();
             }
             Err(e) => self.set_error(&e),
         }
@@ -616,6 +675,102 @@ impl Glue {
             .set_files(to_model(self.store.files(name).unwrap_or_default()));
     }
 
+    /// Offers the recovery copy of the open file, if there is a different one.
+    fn check_recovery(&mut self) {
+        if !self.loaded {
+            return;
+        }
+        self.recovered = pending_recovery(
+            &*self.store,
+            &self.project,
+            &self.file,
+            self.session.doc().text(),
+        );
+        self.editor().set_recovery_open(self.recovered.is_some());
+    }
+
+    fn recovery_answered(&mut self, restore: bool) {
+        self.editor().set_recovery_open(false);
+        let Some(text) = self.recovered.take() else { return };
+        if restore {
+            self.session.replace_text(text);
+            self.refresh_lists();
+            self.rebuild();
+        } else if let Err(e) = self.store.clear_recovery(&self.project, &self.file) {
+            self.set_error(&format!("Recovery copy not removed: {e}"));
+        }
+    }
+
+    fn recovery_tick(&mut self) {
+        match recovery_tick(
+            &*self.store,
+            &self.project,
+            &self.file,
+            &self.session,
+            self.loaded,
+            &mut self.last_recovery,
+        ) {
+            Ok(_) => self.recovery_failed = false,
+            Err(e) => {
+                if !self.recovery_failed {
+                    self.recovery_failed = true;
+                    self.set_error(&e);
+                }
+            }
+        }
+    }
+
+    fn extract_open(&mut self) {
+        self.flush_prop();
+        self.editor().set_message("".into());
+        if self.session.selection().is_none() {
+            self.set_error("部品にする要素を選んでください");
+            return;
+        }
+        self.editor().set_dialog_error("".into());
+        self.editor().set_extract_step(1);
+    }
+
+    fn extract_name_changed(&mut self, step: i32, name: &str) {
+        let err = if name.is_empty() {
+            None
+        } else if step == 1 {
+            self.session.component_name_error(name)
+        } else if crate::session::is_identifier(name) {
+            None
+        } else {
+            Some("名前に使えるのは英数字・_・- だけです(先頭は英字か _)".to_string())
+        };
+        self.editor().set_dialog_error(err.unwrap_or_default().into());
+    }
+
+    fn extract_run(&mut self, name: &str) {
+        self.editor().set_message("".into());
+        match self.session.extract_selection(name) {
+            Ok(()) => {
+                self.extracted = name.to_string();
+                self.refresh_lists();
+                self.rebuild();
+                self.editor().set_dialog_error("".into());
+                self.editor().set_extract_step(2);
+            }
+            Err(e) => self.editor().set_dialog_error(e.to_string().into()),
+        }
+    }
+
+    fn declaration_add(&mut self, kind: i32, ty: &str, name: &str) {
+        let Some(kind) = crate::session::DeclKind::from_index(kind) else { return };
+        let component = self.extracted.clone();
+        match self.session.add_declaration(&component, kind, ty, name) {
+            Ok(()) => {
+                self.rebuild();
+                self.editor().set_dialog_error("".into());
+                self.toast(&format!("{name} を追加しました"));
+            }
+            Err(e) => self.editor().set_dialog_error(e.to_string().into()),
+        }
+    }
+
     fn choose_component(&mut self, name: &str) {
         self.flush_prop();
         self.discard_source_edits();
@@ -668,6 +823,11 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_zoom, |g, m| g.zoom_by(m));
     on!(on_tidy, |g| g.tidy());
     on!(on_untidy, |g| g.untidy());
+    on!(on_extract_open, |g| g.extract_open());
+    on!(on_name_changed, |g, s, n| g.extract_name_changed(s, &n));
+    on!(on_extract_run, |g, n| g.extract_run(&n));
+    on!(on_declaration_add, |g, k, t, n| g.declaration_add(k, &t, &n));
+    on!(on_recovery_answered, |g, r| g.recovery_answered(r));
     on!(on_guide_edited, |g, p, v| g.guide_edited(&p, &v));
 }
 
@@ -706,6 +866,11 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
             source_dirty: false,
             prop_timer: slint::Timer::default(),
             toast_timer: slint::Timer::default(),
+            recovery_timer: slint::Timer::default(),
+            last_recovery: None,
+            recovery_failed: false,
+            recovered: None,
+            extracted: String::new(),
             guide_target: RefCell::new(None),
         })
     });
@@ -714,10 +879,26 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
         let mut g = glue.borrow_mut();
         g.refresh_lists();
         match load_error {
-            None => g.rebuild(),
+            None => {
+                g.rebuild();
+                g.check_recovery();
+            }
             Some(e) => g.set_error(&format!("Cannot open {e}")),
         }
     }
+
+    let weak = Rc::downgrade(&glue);
+    glue.borrow().recovery_timer.start(
+        slint::TimerMode::Repeated,
+        RECOVERY_INTERVAL,
+        move || {
+            if let Some(g) = weak.upgrade()
+                && let Ok(mut g) = g.try_borrow_mut()
+            {
+                g.recovery_tick();
+            }
+        },
+    );
 
     let weak = Rc::downgrade(&glue);
     let save: Rc<dyn Fn()> = Rc::new(move || {

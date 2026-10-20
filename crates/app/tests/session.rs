@@ -700,3 +700,54 @@ fn failed_guide_edit_keeps_selection() {
     assert!(s.set_guide_property("spacing", "4").is_err());
     assert_eq!(s.selection(), Some(&path(&[0, 0, 0])));
 }
+
+#[test]
+fn extract_selection_switches_selection_to_usage() {
+    let mut s = session();
+    s.tap(25., 25.);
+    assert_eq!(s.selection(), Some(&path(&[0, 0])));
+    s.extract_selection("Inner").unwrap();
+    assert_eq!(s.selection(), Some(&path(&[0, 0])));
+    let names: Vec<String> = s.doc().components().into_iter().map(|c| c.name).collect();
+    assert!(names.contains(&"Inner".to_string()), "{names:?}");
+    assert!(s.doc().text().contains("Inner {"), "{}", s.doc().text());
+}
+
+#[test]
+fn extract_selection_without_selection_or_bad_name_fails() {
+    let mut s = session();
+    assert!(matches!(s.extract_selection("Inner"), Err(SessionError::NoSelection)));
+    s.tap(25., 25.);
+    assert!(s.extract_selection("Main").is_err());
+    assert!(s.extract_selection("1bad").is_err());
+}
+
+#[test]
+fn declaration_text_shapes() {
+    use app::session::{DeclKind, declaration_text};
+    assert_eq!(declaration_text(DeclKind::InProperty, "string", "label"), "in property <string> label;");
+    assert_eq!(declaration_text(DeclKind::InOutProperty, "int", "n"), "in-out property <int> n;");
+    assert_eq!(declaration_text(DeclKind::OutProperty, "bool", "ok"), "out property <bool> ok;");
+    assert_eq!(declaration_text(DeclKind::Callback, "string", "clicked"), "callback clicked();");
+}
+
+#[test]
+fn extract_then_add_declarations_and_name_errors() {
+    use app::session::DeclKind;
+    let mut s = session();
+    assert!(s.component_name_error("Main").is_some());
+    assert!(s.component_name_error("9x").is_some());
+    assert!(s.component_name_error("").is_some());
+    assert!(s.component_name_error("Card").is_none());
+    s.tap(25., 25.);
+    s.extract_selection("Card").unwrap();
+    s.add_declaration("Card", DeclKind::InProperty, "string", "label").unwrap();
+    s.add_declaration("Card", DeclKind::Callback, "string", "clicked").unwrap();
+    let t = s.doc().text();
+    assert!(t.contains("in property <string> label;"), "{t}");
+    assert!(t.contains("callback clicked();"), "{t}");
+    assert!(s.component_name_error("Card").is_some());
+    assert!(s.add_declaration("Card", DeclKind::InProperty, "string", "a b").is_err());
+    assert!(s.add_declaration("Card", DeclKind::InProperty, "nope", "x").is_err());
+    assert!(s.rebuild_standalone(300., 300.), "{:?}", s.diagnostics());
+}

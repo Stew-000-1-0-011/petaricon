@@ -160,6 +160,52 @@ pub enum Corner {
     BottomRight,
 }
 
+/// The kinds of declaration the extract dialog can add to a component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclKind {
+    InProperty,
+    InOutProperty,
+    OutProperty,
+    Callback,
+}
+
+/// Types offered for a declared property.
+pub const DECL_TYPES: [&str; 8] = [
+    "string", "int", "float", "bool", "length", "color", "brush", "image",
+];
+
+impl DeclKind {
+    pub fn from_index(i: i32) -> Option<Self> {
+        match i {
+            0 => Some(Self::InProperty),
+            1 => Some(Self::InOutProperty),
+            2 => Some(Self::OutProperty),
+            3 => Some(Self::Callback),
+            _ => None,
+        }
+    }
+}
+
+/// `[A-Za-z_][A-Za-z0-9_-]*`
+pub fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// The one-line declaration, e.g. `in property <string> label;` or `callback clicked();`.
+/// `ty` is ignored for callbacks.
+pub fn declaration_text(kind: DeclKind, ty: &str, name: &str) -> String {
+    match kind {
+        DeclKind::InProperty => format!("in property <{ty}> {name};"),
+        DeclKind::InOutProperty => format!("in-out property <{ty}> {name};"),
+        DeclKind::OutProperty => format!("out property <{ty}> {name};"),
+        DeclKind::Callback => format!("callback {name}();"),
+    }
+}
+
 /// Callers must call `rebuild()` after each successful edit: geometry (tap, selection, move,
 /// resize) comes from the last successful build, resolved against `snapshot`, the text that
 /// build compiled.
@@ -406,6 +452,44 @@ impl Session {
             self.selection = Some(p);
         }
         Ok(())
+    }
+
+    /// Moves the selected element into a new component `name`; the selection becomes the
+    /// usage that replaced it.
+    pub fn extract_selection(&mut self, name: &str) -> Result<(), SessionError> {
+        let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
+        self.apply(Op::ExtractComponent { path, name: name.to_string() })
+    }
+
+    /// Why `name` cannot name a new component, if it cannot.
+    pub fn component_name_error(&self, name: &str) -> Option<String> {
+        if !is_identifier(name) {
+            return Some("名前に使えるのは英数字・_・- だけです(先頭は英字か _)".into());
+        }
+        if self.doc.components().iter().any(|c| c.name == name) {
+            return Some("同じ名前の部品があります".into());
+        }
+        None
+    }
+
+    /// Adds a property or callback declaration to `component`.
+    pub fn add_declaration(
+        &mut self,
+        component: &str,
+        kind: DeclKind,
+        ty: &str,
+        name: &str,
+    ) -> Result<(), SessionError> {
+        if !is_identifier(name) {
+            return Err(EditError::InvalidTarget(format!("`{name}` is not a valid name")).into());
+        }
+        if kind != DeclKind::Callback && !DECL_TYPES.contains(&ty) {
+            return Err(EditError::InvalidTarget(format!("`{ty}` is not a supported type")).into());
+        }
+        self.apply(Op::AddDeclaration {
+            component: component.to_string(),
+            text: declaration_text(kind, ty, name),
+        })
     }
 
     fn revalidate(&mut self) {

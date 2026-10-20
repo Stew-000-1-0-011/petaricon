@@ -232,3 +232,153 @@ export component NewProject inherits HorizontalLayout {
         }
     }
 }
+
+// A selectable chip, at least 44px tall.
+export component Chip inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked();
+    height: 44px;
+    min-width: 44px;
+    border-radius: 4px;
+    background: root.selected ? #3a6ea5 : ta.pressed ? #4a5058 : #383d44;
+    Text {
+        text: root.text;
+        color: white;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+// Dimmed full-window backdrop with a centred card; swallows all taps.
+export component ModalCard inherits Rectangle {
+    in property <length> card-width: 360px;
+    background: #000000a0;
+    TouchArea { }
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: min(parent.height * 0.12, 80px);
+        width: min(parent.width - 24px, root.card-width);
+        height: inner.preferred-height + 24px;
+        background: #2a2e33;
+        border-radius: 8px;
+        inner := VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+            @children
+        }
+    }
+}
+
+// Step 1: name the new component. Step 2: add properties / callbacks to it.
+export component ExtractDialog inherits ModalCard {
+    in property <int> step;
+    in property <string> error;
+    callback name-changed(int, string);
+    callback run(string);
+    callback add(int /* kind */, string /* type */, string /* name */);
+    callback close();
+    property <int> kind;
+    property <string> ty: "string";
+
+    if root.step == 1: VerticalLayout {
+        spacing: 8px;
+        Text { text: "部品にする"; color: white; font-size: 16px; }
+        Text { text: "新しい部品の名前"; color: #9aa3ad; font-size: 12px; }
+        name1 := LineEdit {
+            height: 44px;
+            placeholder-text: "例: Card";
+            edited(t) => { root.name-changed(1, t); }
+            accepted(t) => { if t != "" && root.error == "" { root.run(t); } }
+            init => { self.focus(); }
+        }
+        Text {
+            text: root.error;
+            color: #ff8a80;
+            font-size: 12px;
+            wrap: word-wrap;
+            visible: root.error != "";
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            height: 44px;
+            ToolButton { text: "Cancel"; clicked => { root.close(); } }
+            ToolButton {
+                text: "OK";
+                enabled: name1.text != "" && root.error == "";
+                clicked => { root.run(name1.text); }
+            }
+        }
+    }
+    if root.step == 2: VerticalLayout {
+        spacing: 8px;
+        Text { text: "プロパティ/コールバックを追加"; color: white; font-size: 16px; }
+        for row[r] in [["in property", "in-out property"], ["out property", "callback"]]: HorizontalLayout {
+            spacing: 4px;
+            for k[c] in row: Chip {
+                text: k;
+                horizontal-stretch: 1;
+                selected: root.kind == r * 2 + c;
+                clicked => { root.kind = r * 2 + c; }
+            }
+        }
+        if root.kind != 3: VerticalLayout {
+            spacing: 4px;
+            for row[r] in [["string", "int", "float", "bool"], ["length", "color", "brush", "image"]]: HorizontalLayout {
+                spacing: 4px;
+                for t in row: Chip {
+                    text: t;
+                    horizontal-stretch: 1;
+                    selected: root.ty == t;
+                    clicked => { root.ty = t; }
+                }
+            }
+        }
+        name2 := LineEdit {
+            height: 44px;
+            placeholder-text: root.kind == 3 ? "例: clicked" : "例: label";
+            edited(t) => { root.name-changed(2, t); }
+        }
+        Text {
+            text: root.error;
+            color: #ff8a80;
+            font-size: 12px;
+            wrap: word-wrap;
+            visible: root.error != "";
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            height: 44px;
+            ToolButton { text: "Done"; clicked => { root.close(); } }
+            ToolButton {
+                text: "Add";
+                enabled: name2.text != "" && root.error == "";
+                clicked => {
+                    root.add(root.kind, root.ty, name2.text);
+                    name2.text = "";
+                }
+            }
+        }
+    }
+}
+
+export component RecoveryDialog inherits ModalCard {
+    callback answered(bool);
+    VerticalLayout {
+        spacing: 12px;
+        Text {
+            text: "保存されていない変更があります。復元しますか?";
+            color: white;
+            font-size: 15px;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            height: 44px;
+            ToolButton { text: "いいえ"; clicked => { root.answered(false); } }
+            ToolButton { text: "はい"; clicked => { root.answered(true); } }
+        }
+    }
+}

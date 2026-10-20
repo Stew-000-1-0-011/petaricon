@@ -109,3 +109,45 @@ fn open_file_aborts_when_saving_the_current_file_fails() {
     editor.invoke_open("default".into(), "other.slint".into());
     assert_eq!(editor.get_current_file().as_str(), "other.slint");
 }
+
+#[test]
+fn recovery_tick_writes_only_changed_dirty_text_and_never_the_real_file() {
+    use app::glue::recovery_tick;
+    let (_d, store) = setup();
+    let mut s = session(SRC);
+    let mut last = None;
+    // Clean: nothing written.
+    assert_eq!(recovery_tick(&store, "p", "main.slint", &s, true, &mut last), Ok(false));
+    assert_eq!(store.take_recovery("p", "main.slint").unwrap(), None);
+    s.replace_text(format!("{SRC}// a\n"));
+    assert_eq!(recovery_tick(&store, "p", "main.slint", &s, true, &mut last), Ok(true));
+    assert_eq!(
+        store.take_recovery("p", "main.slint").unwrap().as_deref(),
+        Some(format!("{SRC}// a\n").as_str())
+    );
+    // Same text: no second write.
+    assert_eq!(recovery_tick(&store, "p", "main.slint", &s, true, &mut last), Ok(false));
+    s.replace_text(format!("{SRC}// b\n"));
+    assert_eq!(recovery_tick(&store, "p", "main.slint", &s, true, &mut last), Ok(true));
+    assert_eq!(store.read("p", "main.slint").unwrap(), SRC);
+    // Saving clears the copy; a later clean tick leaves things alone.
+    assert_eq!(save_if_dirty(&store, "p", "main.slint", &mut s, true), Ok(true));
+    assert_eq!(store.take_recovery("p", "main.slint").unwrap(), None);
+    assert_eq!(recovery_tick(&store, "p", "main.slint", &s, true, &mut last), Ok(false));
+    assert_eq!(last, None);
+}
+
+#[test]
+fn recovery_tick_skips_unloaded_and_pending_recovery_ignores_equal_text() {
+    use app::glue::{pending_recovery, recovery_tick};
+    let (_d, store) = setup();
+    let mut s = session("");
+    s.replace_text("x".into());
+    let mut last = None;
+    assert_eq!(recovery_tick(&store, "p", "main.slint", &s, false, &mut last), Ok(false));
+    assert_eq!(pending_recovery(&store, "p", "main.slint", SRC), None);
+    store.write_recovery("p", "main.slint", SRC).unwrap();
+    assert_eq!(pending_recovery(&store, "p", "main.slint", SRC), None);
+    store.write_recovery("p", "main.slint", "draft").unwrap();
+    assert_eq!(pending_recovery(&store, "p", "main.slint", SRC).as_deref(), Some("draft"));
+}

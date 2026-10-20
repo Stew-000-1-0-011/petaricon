@@ -1,6 +1,6 @@
 import { Palette } from "std-widgets.slint";
 import { Canvas, GuideBand } from "canvas.slint";
-import { BottomPanel, ToolButton, MenuList, NewProject, TreeRowItem, PropItem } from "panels.slint";
+import { BottomPanel, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, ExtractDialog, RecoveryDialog } from "panels.slint";
 export { TreeRowItem, PropItem, GuideBand }
 
 export component Editor inherits Window {
@@ -46,6 +46,9 @@ export component Editor inherits Window {
     in property <length> a-h;
     in property <string> toast-text;
     in property <int> guides-rev;
+    in-out property <int> extract-step;
+    in-out property <string> dialog-error;
+    in-out property <bool> recovery-open;
 
     callback tapped(length, length);
     callback drag-finished(length, length);
@@ -69,6 +72,11 @@ export component Editor inherits Window {
     callback tidy();
     callback untidy();
     callback guide-edited(string, string);
+    callback extract-open();
+    callback name-changed(int /* step */, string);
+    callback extract-run(string);
+    callback declaration-add(int /* kind */, string /* type */, string /* name */);
+    callback recovery-answered(bool);
 
     init => { Palette.color-scheme = ColorScheme.dark; }
 
@@ -104,7 +112,7 @@ export component Editor inherits Window {
             ToolButton { text: root.dirty ? "Save*" : "Save"; clicked => { root.save(); } }
             ToolButton { text: "Tidy"; clicked => { root.tidy(); } }
             ToolButton { text: "Untidy"; clicked => { root.untidy(); } }
-            ToolButton { text: "Extract"; enabled: false; }
+            ToolButton { text: "Extract"; clicked => { root.extract-open(); } }
             ToolButton { text: "-"; min-width: 32px; clicked => { root.zoom(0.8); } }
             ToolButton { text: "+"; min-width: 32px; clicked => { root.zoom(1.25); } }
             ToolButton { text: "File"; clicked => { root.menu-open = true; } }
@@ -248,5 +256,18 @@ export component Editor inherits Window {
                 ToolButton { text: "Close"; height: 44px; clicked => { root.menu-open = false; } }
             }
         }
+    }
+
+    if root.extract-step != 0: ExtractDialog {
+        step: root.extract-step;
+        error: root.dialog-error;
+        name-changed(st, t) => { root.name-changed(st, t); }
+        run(n) => { root.extract-run(n); }
+        add(k, t, n) => { root.declaration-add(k, t, n); }
+        close => { root.extract-step = 0; root.dialog-error = ""; }
+    }
+
+    if root.recovery-open: RecoveryDialog {
+        answered(r) => { root.recovery-answered(r); }
     }
 }
