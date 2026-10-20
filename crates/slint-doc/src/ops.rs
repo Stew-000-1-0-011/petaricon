@@ -40,6 +40,14 @@ pub enum Op {
         layout: ElementPath,
         positions: Vec<(i32, i32)>,
     },
+    /// Turns the element at `path` into a new component `name` (declared right before the
+    /// component that contains it, as `component {name} inherits {type} { ... }`, carrying the
+    /// element's body without `x` / `y` / `width` / `height`) and replaces it by a usage that
+    /// keeps its id and those geometry bindings. Returns the usage's path.
+    ExtractComponent { path: ElementPath, name: String },
+    /// Inserts the one-line declaration `text` into the root element of `component`: after its
+    /// last property / callback declaration, else at the top of its body.
+    AddDeclaration { component: String, text: String },
 }
 
 /// Description of the layout created by [`Op::WrapInLayout`].
@@ -505,6 +513,202 @@ fn is_prefix(a: &[usize], b: &[usize]) -> bool {
     b.len() >= a.len() && b[..a.len()] == *a
 }
 
+const GEOMETRY: [&str; 4] = ["x", "y", "width", "height"];
+
+fn valid_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Edits for `Op::ExtractComponent`: the new declaration and the usage replacing the target.
+fn extract_component(
+    text: &str,
+    root: &SyntaxNode,
+    path: &ElementPath,
+    name: &str,
+) -> Result<Vec<TextEdit>, EditError> {
+    let (wrapper, element) = resolve_in(root, path)?;
+    let wrapper = wrapper
+        .ok_or_else(|| EditError::InvalidTarget("the component root cannot be extracted".into()))?;
+    if wrapper.kind() != SyntaxKind::SubElement {
+        return Err(EditError::InvalidTarget(
+            "repeated or conditional elements cannot be extracted".into(),
+        ));
+    }
+    if !valid_identifier(name) {
+        return Err(EditError::InvalidTarget(format!(
+            "`{name}` is not a valid component name"
+        )));
+    }
+    if syntax::component_node(root, name).is_some() {
+        return Err(EditError::InvalidTarget(format!(
+            "component `{name}` already exists"
+        )));
+    }
+    let type_name = crate::type_name(&element);
+    let type_node = element
+        .child_node(SyntaxKind::QualifiedName)
+        .filter(|_| !type_name.is_empty())
+        .ok_or_else(|| EditError::InvalidTarget("element has no type".into()))?;
+    let (Some(lb), Some(rb)) = (
+        element.child_token(SyntaxKind::LBrace),
+        element.child_token(SyntaxKind::RBrace),
+    ) else {
+        return Err(EditError::InvalidTarget("element has no body".into()));
+    };
+    let (body_start, body_end) = (
+        usize::from(lb.text_range().end()),
+        usize::from(rb.text_range().start()),
+    );
+
+    // Geometry bindings that were present, in source order.
+    let mut kept = Vec::new();
+    let mut removals = Vec::new();
+    for b in element
+        .children()
+        .filter(|b| b.kind() == SyntaxKind::Binding)
+    {
+        let Some(id) = b.child_text(SyntaxKind::Identifier) else {
+            continue;
+        };
+        if GEOMETRY.contains(&id.as_str()) {
+            let t = text[range(&b).0..range(&b).1].trim();
+            kept.push(if t.ends_with(';') || t.ends_with('}') {
+                t.to_string()
+            } else {
+                format!("{t};")
+            });
+            removals.push((id.to_string(), None));
+        }
+    }
+    let strip = set_bindings(text, &element, &removals)?
+        .into_iter()
+        .map(|e| TextEdit {
+            start: e.start - body_start,
+            end: e.end - body_start,
+            text: e.text,
+        })
+        .collect();
+    let body = apply_edits(&text[body_start..body_end], strip)?;
+    let from = format!("{}    ", syntax::element_indent(text, &element));
+    let mut lines: Vec<&str> = body.split('\n').collect();
+    // Text sharing the line with `{` is the first body line.
+    let first = lines.remove(0);
+    let mut out: Vec<String> = Vec::new();
+    if !first.trim().is_empty() {
+        out.push(format!("    {}", first.trim()));
+    }
+    out.extend(
+        reindent(&lines.join("\n"), &from, "    ")
+            .split('\n')
+            .map(str::to_string),
+    );
+    while out.last().is_some_and(|l| l.trim().is_empty()) {
+        out.pop();
+    }
+    while out.first().is_some_and(|l| l.trim().is_empty()) {
+        out.remove(0);
+    }
+    let mut declaration = format!("component {name} inherits {type_name} {{\n");
+    for l in &out {
+        declaration.push_str(l);
+        declaration.push('\n');
+    }
+    declaration.push_str("}\n\n");
+
+    let component = syntax::component_node(root, &path.component)
+        .ok_or_else(|| EditError::ComponentNotFound(path.component.clone()))?;
+    let at = line_start(text, range(&component).0);
+
+    // The usage replaces the target's own text; an `id := ` prefix stays.
+    let (w_start, w_end) = range(&wrapper);
+    let prefix = &text[w_start..range(&type_node).0];
+    let usage = if kept.is_empty() {
+        format!("{prefix}{name} {{ }}")
+    } else {
+        format!("{prefix}{name} {{ {} }}", kept.join(" "))
+    };
+    Ok(vec![
+        TextEdit {
+            start: at,
+            end: at,
+            text: declaration,
+        },
+        TextEdit {
+            start: w_start,
+            end: w_end,
+            text: usage,
+        },
+    ])
+}
+
+/// The edit for `Op::AddDeclaration`.
+fn add_declaration(
+    text: &str,
+    root: &SyntaxNode,
+    component: &str,
+    decl: &str,
+) -> Result<TextEdit, EditError> {
+    let decl = decl.trim();
+    if decl.is_empty() || decl.contains('\n') {
+        return Err(EditError::InvalidTarget(
+            "declaration must be one non-empty line".into(),
+        ));
+    }
+    let node = syntax::component_node(root, component)
+        .ok_or_else(|| EditError::ComponentNotFound(component.to_string()))?;
+    let element = syntax::component_element(&node)
+        .ok_or_else(|| EditError::InvalidTarget("component has no root element".into()))?;
+    let last = element
+        .children()
+        .filter(|n| {
+            matches!(
+                n.kind(),
+                SyntaxKind::PropertyDeclaration | SyntaxKind::CallbackDeclaration
+            )
+        })
+        .last();
+    let (at, indent) = match &last {
+        Some(d) => (range(d).1, syntax::line_indent(text, range(d).0)),
+        None => {
+            let lb = element
+                .child_token(SyntaxKind::LBrace)
+                .ok_or_else(|| EditError::InvalidTarget("element has no `{`".into()))?;
+            let first_member = element
+                .children()
+                .find(|n| n.kind() == SyntaxKind::Binding)
+                .map(|n| syntax::line_indent(text, range(&n).0));
+            (
+                usize::from(lb.text_range().end()),
+                first_member.unwrap_or_else(|| syntax::child_indent(text, &element)),
+            )
+        }
+    };
+    let le = line_end(text, at);
+    let rest = text[at..le].trim();
+    if rest.is_empty() || rest.starts_with("//") {
+        // Own line: after any same-line comment, on a new line.
+        let mut end = le;
+        if end > at && text.as_bytes()[end - 1] == b'\r' {
+            end -= 1;
+        }
+        Ok(TextEdit {
+            start: end,
+            end,
+            text: format!("\n{indent}{decl}"),
+        })
+    } else {
+        Ok(TextEdit {
+            start: at,
+            end: at,
+            text: format!(" {decl}"),
+        })
+    }
+}
+
 impl Document {
     /// Applies `op`. Returns the (post-edit) path of the edited element.
     pub fn apply(&mut self, op: Op) -> Result<Option<ElementPath>, EditError> {
@@ -741,6 +945,14 @@ impl Document {
                 }
                 let edit = replace_extent(&self.text, &wrapper, blocks.join("\n"));
                 (apply_edits(&self.text, vec![edit])?, Some(parent_path))
+            }
+            Op::ExtractComponent { path, name } => {
+                let edits = extract_component(&self.text, &root, &path, &name)?;
+                (apply_edits(&self.text, edits)?, Some(path))
+            }
+            Op::AddDeclaration { component, text } => {
+                let edit = add_declaration(&self.text, &root, &component, &text)?;
+                (apply_edits(&self.text, vec![edit])?, None)
             }
         };
         self.set_text(new_text);
