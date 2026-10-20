@@ -45,6 +45,7 @@ export component Editor inherits Window {
     in property <length> a-w;
     in property <length> a-h;
     in property <string> toast-text;
+    in property <int> guides-rev;
 
     callback tapped(length, length);
     callback drag-finished(length, length);
@@ -145,6 +146,7 @@ export component Editor inherits Window {
         sel-h: root.sel-h;
         zoom: root.zoom-level;
         has-guides: root.has-guides;
+        guides-rev: root.guides-rev;
         g-x: root.g-x;
         g-y: root.g-y;
         g-w: root.g-w;
@@ -190,16 +192,17 @@ export component Editor inherits Window {
         x: (root.width - self.width) / 2;
         y: root.height - root.inset-bottom - self.height - 24px;
         width: min(root.width - 32px, 420px);
-        height: 44px;
+        height: toast-label.preferred-height + 24px;
         background: #000000d0;
         border-radius: 8px;
-        Text {
+        toast-label := Text {
+            x: 8px;
+            y: 12px;
             width: parent.width - 16px;
             text: root.toast-text;
             color: white;
             font-size: 13px;
             horizontal-alignment: center;
-            vertical-alignment: center;
             wrap: word-wrap;
         }
     }

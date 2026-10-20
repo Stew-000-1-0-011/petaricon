@@ -52,6 +52,9 @@ export component Canvas inherits Rectangle {
     in property <length> a-y;
     in property <length> a-w;
     in property <length> a-h;
+    // Bumped by the glue whenever the guided layout changes; closes the edit popup.
+    in property <int> guides-rev;
+    changed guides-rev => { root.editing-prop = ""; }
     callback guide-edited(string /* property */, string /* value */);
     property <string> editing-prop;
     property <string> editing-value;
@@ -109,6 +112,15 @@ export component Canvas inherits Rectangle {
         let dy = min(top-d, bottom-d);
         if dx > r || dy > r { return -1; }
         return (left-d <= right-d ? 0 : 1) + (top-d <= bottom-d ? 0 : 2);
+    }
+
+    // True when a 44px box centred on (cx, cy) would reach a corner-handle zone.
+    function label-blocked(cx: length, cy: length) -> bool {
+        if !root.has-selection { return false; }
+        let r = min(24px, min(root.base-w, root.base-h) / 3) + 22px;
+        let dx = min(abs(cx - root.base-x), abs(cx - (root.base-x + root.base-w)));
+        let dy = min(abs(cy - root.base-y), abs(cy - (root.base-y + root.base-h)));
+        return dx <= r && dy <= r;
     }
 
     function inside-selection(px: length, py: length) -> bool {
@@ -245,6 +257,17 @@ export component Canvas inherits Rectangle {
         width: b.w * root.zoom;
         height: b.h * root.zoom;
         background: b.is-gap ? #ffb74d50 : #4fc3f740;
+    }
+
+    // Only a 44x44 box around each number takes input (never the band itself), and not where
+    // it would cover a corner handle of the selection.
+    for b in root.bands: Rectangle {
+        property <length> cx: root.pan-x + (b.x + b.w / 2) * root.zoom;
+        property <length> cy: root.pan-y + (b.y + b.h / 2) * root.zoom;
+        x: self.cx - 22px;
+        y: self.cy - 22px;
+        width: 44px;
+        height: 44px;
 
         Text {
             x: (parent.width - self.width) / 2;
@@ -253,17 +276,13 @@ export component Canvas inherits Rectangle {
             color: white;
             font-size: 11px;
         }
-        // At least 44px around the number.
         TouchArea {
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            width: max(44px, parent.width);
-            height: max(44px, parent.height);
+            enabled: !root.label-blocked(parent.cx, parent.cy);
             clicked => {
                 root.editing-prop = b.property;
                 root.editing-value = "\{b.value}";
-                root.editing-x = max(4px, min(root.width - 124px, root.pan-x + (b.x + b.w / 2) * root.zoom - 60px));
-                root.editing-y = max(4px, min(root.height - 48px, root.pan-y + (b.y + b.h / 2) * root.zoom - 20px));
+                root.editing-x = max(4px, min(root.width - 124px, parent.cx - 60px));
+                root.editing-y = max(4px, min(root.height - 48px, parent.cy - 20px));
             }
         }
     }

@@ -724,6 +724,15 @@ impl Session {
         if !Self::is_container(&info) || matches!(info.kind, ElementKind::Layout(_)) {
             return Err(SessionError::NotAContainer);
         }
+        for i in 0..info.child_count {
+            let kind = self.doc.element(&Self::child_path(&path, i)).map(|c| c.kind);
+            if matches!(kind, Some(ElementKind::Repeated | ElementKind::Conditional)) {
+                return Err(EditError::InvalidTarget(
+                    "cannot tidy a container with for / if children".into(),
+                )
+                .into());
+            }
+        }
         let container = self.hit_of(&path).ok_or(SessionError::NoGeometry)?;
         let children = (0..info.child_count)
             .map(|i| self.hit_of(&Self::child_path(&path, i)).map(|h| h.local))
@@ -735,8 +744,9 @@ impl Session {
         Ok(plan.warnings)
     }
 
-    /// The layout the guides act on: the selection when it is a horizontal or vertical
-    /// layout, else the first such layout child of the selected container.
+    /// The one layout that guides and untidy act on: the selection when it is a horizontal or
+    /// vertical layout, else the selected container's only horizontal/vertical layout child
+    /// (other children may exist). A container with several such layouts is ambiguous: `None`.
     fn guide_layout(&self) -> Option<(ElementPath, ElementInfo, LayoutKind)> {
         let path = self.selection.clone()?;
         let info = self.doc.element(&path)?;
@@ -750,36 +760,25 @@ impl Session {
         if !Self::is_container(&info) {
             return None;
         }
-        (0..info.child_count).find_map(|i| {
+        let mut found = (0..info.child_count).filter_map(|i| {
             let p = Self::child_path(&path, i);
             let ci = self.doc.element(&p)?;
             stack(&ci).map(|k| (p, ci, k))
-        })
+        });
+        let first = found.next()?;
+        found.next().is_none().then_some(first)
     }
 
-    /// Replaces the selected layout (or the only layout of the selected container) by its
-    /// children, keeping their on-screen positions rounded to the grid.
+    /// Path of the layout the guides currently describe.
+    pub fn guide_layout_path(&self) -> Option<ElementPath> {
+        self.guide_layout().map(|(p, ..)| p)
+    }
+
+    /// Replaces the layout found by the same rule as the guides by its children, keeping
+    /// their on-screen positions rounded to the grid. `NotALayout` when there is none.
     pub fn untidy_selection(&mut self) -> Result<(), SessionError> {
-        let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
-        let info = self
-            .doc
-            .element(&path)
-            .ok_or_else(|| EditError::ElementNotFound(path.clone()))?;
-        let layout = if matches!(info.kind, ElementKind::Layout(_)) {
-            path
-        } else if info.child_count == 1 {
-            let c = Self::child_path(&path, 0);
-            match self.doc.element(&c) {
-                Some(ci) if matches!(ci.kind, ElementKind::Layout(_)) => c,
-                _ => return Err(SessionError::NotALayout),
-            }
-        } else {
-            return Err(SessionError::NotALayout);
-        };
-        let layout_info = self
-            .doc
-            .element(&layout)
-            .ok_or_else(|| EditError::ElementNotFound(layout.clone()))?;
+        self.selection.as_ref().ok_or(SessionError::NoSelection)?;
+        let (layout, layout_info, _) = self.guide_layout().ok_or(SessionError::NotALayout)?;
         let mut parent = layout.clone();
         parent.indices.pop();
         let origin = self.hit_of(&parent).ok_or(SessionError::NoGeometry)?.rect;
@@ -807,8 +806,12 @@ impl Session {
     /// Edits a property of the guided layout, selecting the layout first when needed.
     pub fn set_guide_property(&mut self, name: &str, value: &str) -> Result<(), SessionError> {
         let (path, ..) = self.guide_layout().ok_or(SessionError::NotALayout)?;
-        self.selection = Some(path);
-        self.set_property(name, value)
+        let previous = self.selection.replace(path);
+        let r = self.set_property(name, value);
+        if r.is_err() {
+            self.selection = previous;
+        }
+        r
     }
 
     pub fn tree_action(&mut self, path: &ElementPath, action: TreeAction) -> Result<(), SessionError> {

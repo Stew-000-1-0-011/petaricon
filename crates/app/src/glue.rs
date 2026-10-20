@@ -94,6 +94,7 @@ pub struct Glue {
     source_dirty: bool,
     prop_timer: slint::Timer,
     toast_timer: slint::Timer,
+    guide_target: RefCell<Option<slint_doc::ElementPath>>,
 }
 
 /// A property edit with the element and document it was typed for.
@@ -264,6 +265,12 @@ impl Glue {
 
     fn update_guides(&self) {
         let ed = self.editor();
+        let target = self.session.guide_layout_path();
+        if *self.guide_target.borrow() != target {
+            // A different layout: an open number editor must not commit into it.
+            ed.set_guides_rev(ed.get_guides_rev().wrapping_add(1));
+            *self.guide_target.borrow_mut() = target;
+        }
         let Some(g) = self.session.guides() else {
             ed.set_has_guides(false);
             ed.set_bands(ModelRc::new(VecModel::from(Vec::<GuideBand>::new())));
@@ -290,6 +297,8 @@ impl Glue {
             .iter()
             .map(|l| band(l, false))
             .chain(g.gaps.iter().map(|l| band(l, true)))
+            // Zero or degenerate bands get neither fill nor tap target.
+            .filter(|b| b.value != 0 && b.w >= 1.0 && b.h >= 1.0)
             .collect();
         ed.set_bands(ModelRc::new(VecModel::from(bands)));
         match g.align_line {
@@ -322,12 +331,17 @@ impl Glue {
         match self.session.tidy_selection() {
             Ok(warnings) => {
                 self.rebuild();
-                if let Some(w) = warnings.first() {
-                    let text = match w {
-                        tidy::Warning::AmbiguousDirection => "先に階層を分けると、きれいに整形できます",
-                        tidy::Warning::Overlap => "重なっている要素があります",
-                    };
-                    self.toast(text);
+                if !warnings.is_empty() {
+                    let text: Vec<&str> = warnings
+                        .iter()
+                        .map(|w| match w {
+                            tidy::Warning::AmbiguousDirection => {
+                                "先に階層を分けると、きれいに整形できます"
+                            }
+                            tidy::Warning::Overlap => "重なっている要素があります",
+                        })
+                        .collect();
+                    self.toast(&text.join("\n"));
                 }
             }
             Err(e) => self.set_error(&e.to_string()),
@@ -692,6 +706,7 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
             source_dirty: false,
             prop_timer: slint::Timer::default(),
             toast_timer: slint::Timer::default(),
+            guide_target: RefCell::new(None),
         })
     });
     connect(editor, &glue);

@@ -632,3 +632,71 @@ fn guides_and_guide_edit() {
     assert!(s.doc().text().contains("spacing: 20px;"), "{}", s.doc().text());
     assert_eq!(s.selection(), Some(&path(&[0, 0])));
 }
+
+#[test]
+fn tidy_untidy_tidy_round_trip_is_stable() {
+    let mut s = tidy_session(TWO_KIDS);
+    s.tidy_selection().unwrap();
+    let first = s.doc().text().to_string();
+    assert!(s.rebuild_standalone(300., 300.));
+    s.untidy_selection().unwrap();
+    assert!(s.rebuild_standalone(300., 300.));
+    s.select_path(path(&[0]));
+    s.tidy_selection().unwrap();
+    assert_eq!(s.doc().text(), first);
+}
+
+fn assert_tidy_refused(child: &str) {
+    let mut s = tidy_session(&format!("{TWO_KIDS}{child}"));
+    let before = s.doc().text().to_string();
+    let err = s.tidy_selection().unwrap_err();
+    assert!(
+        matches!(&err, SessionError::Edit(slint_doc::EditError::InvalidTarget(m)) if m.contains("for / if")),
+        "{err:?}"
+    );
+    assert_eq!(s.doc().text(), before);
+}
+
+#[test]
+fn tidy_refuses_for_children() {
+    assert_tidy_refused("        for i in 3: Rectangle { width: 10px; height: 10px; }\n");
+}
+
+#[test]
+fn tidy_refuses_if_children() {
+    assert_tidy_refused("        if true: Rectangle { width: 10px; height: 10px; }\n");
+}
+
+#[test]
+fn untidy_of_non_layout_is_refused() {
+    let mut s = tidy_session(TWO_KIDS);
+    let before = s.doc().text().to_string();
+    assert!(matches!(s.untidy_selection(), Err(SessionError::NotALayout)));
+    s.select_path(path(&[0, 0]));
+    assert!(matches!(s.untidy_selection(), Err(SessionError::NotALayout)));
+    assert_eq!(s.doc().text(), before);
+}
+
+#[test]
+fn guides_and_untidy_agree_on_the_layout() {
+    let mut s = tidy_session(TWO_KIDS);
+    s.tidy_selection().unwrap();
+    assert!(s.rebuild_standalone(300., 300.));
+    s.select_path(path(&[0]));
+    assert_eq!(s.guide_layout_path(), Some(path(&[0, 0])));
+    assert!(s.guides().is_some());
+    s.untidy_selection().unwrap();
+    assert!(!s.doc().text().contains("Layout"));
+}
+
+#[test]
+fn failed_guide_edit_keeps_selection() {
+    let mut s = tidy_session(TWO_KIDS);
+    s.tidy_selection().unwrap();
+    assert!(s.rebuild_standalone(300., 300.));
+    s.select_path(path(&[0]));
+    // No layout under this selection: the edit fails and the selection stays.
+    s.select_path(path(&[0, 0, 0]));
+    assert!(s.set_guide_property("spacing", "4").is_err());
+    assert_eq!(s.selection(), Some(&path(&[0, 0, 0])));
+}
