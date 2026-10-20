@@ -25,6 +25,7 @@ slint-build = "=1.18.1"
 
 [dev-dependencies]
 i-slint-backend-testing = "=1.18.1"
+tempfile = "3"
 
 [package.metadata.android]
 package = "dev.petaricon.editor"

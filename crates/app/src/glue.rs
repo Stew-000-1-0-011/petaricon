@@ -49,6 +49,29 @@ fn platform_err(e: impl std::fmt::Display) -> slint::PlatformError {
     slint::PlatformError::Other(e.to_string())
 }
 
+/// Writes the document only when it has unsaved edits (every write rotates the single `.bak`),
+/// then marks it saved. `Ok(false)` means there was nothing to write. A session that never
+/// loaded its file is never written.
+pub fn save_if_dirty(
+    store: &dyn ProjectStore,
+    project: &str,
+    file: &str,
+    session: &mut Session,
+    loaded: bool,
+) -> Result<bool, String> {
+    if !loaded {
+        return Err(format!("{file} was not loaded; refusing to overwrite it"));
+    }
+    if !session.doc().is_dirty() {
+        return Ok(false);
+    }
+    store
+        .write(project, file, session.doc().text())
+        .map_err(|e| format!("Save failed: {e}"))?;
+    session.mark_saved();
+    Ok(true)
+}
+
 pub struct Glue {
     editor: slint::Weak<Editor>,
     store: Box<dyn ProjectStore>,
@@ -57,6 +80,8 @@ pub struct Glue {
     file: String,
     session: Session,
     zoom: f32,
+    /// False when the file could not be read; saving is refused then.
+    loaded: bool,
 }
 
 type Shared = Rc<RefCell<Glue>>;
@@ -160,12 +185,16 @@ impl Glue {
     }
 
     fn open_file(&mut self, project: &str, file: &str) {
-        self.save();
+        // Keep the current file open (and its error visible) if its edits cannot be saved.
+        if self.loaded && !self.save() {
+            return;
+        }
         match Self::load(&*self.store, &self.me, project, file) {
             Ok(session) => {
                 self.project = project.to_string();
                 self.file = file.to_string();
                 self.session = session;
+                self.loaded = true;
                 self.refresh_lists();
                 self.editor().set_has_selection(false);
                 self.rebuild();
@@ -174,20 +203,29 @@ impl Glue {
         }
     }
 
-    pub fn save(&mut self) {
+    /// Saves if there are unsaved edits. Returns false when a save was needed and failed.
+    pub fn save(&mut self) -> bool {
         let ed = self.editor();
         ed.set_message("".into());
-        match self
-            .store
-            .write(&self.project, &self.file, self.session.doc().text())
-        {
-            Ok(()) => {
-                self.session.mark_saved();
+        let r = save_if_dirty(
+            &*self.store,
+            &self.project,
+            &self.file,
+            &mut self.session,
+            self.loaded,
+        );
+        let ok = match r {
+            Ok(_) => {
                 ed.set_message("Saved".into());
+                true
             }
-            Err(e) => ed.set_error_text(format!("Save failed: {e}").into()),
-        }
+            Err(e) => {
+                ed.set_error_text(e.into());
+                false
+            }
+        };
         self.sync_status();
+        ok
     }
 
     fn after_edit(&mut self, result: Result<(), crate::session::SessionError>) {
@@ -267,7 +305,7 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_resize_finished, |g, c, dx, dy| g.resize_finished(c, dx, dy));
     on!(on_undo, |g| g.history(true));
     on!(on_redo, |g| g.history(false));
-    on!(on_save, |g| g.save());
+    on!(on_save, |g| { g.save(); });
     on!(on_open, |g, p, f| g.open_file(&p, &f));
     on!(on_select_project, |g, p| g.select_project(&p));
     on!(on_create_project, |g, n| g.create_project(&n));
@@ -288,10 +326,16 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
     };
     let file = Glue::pick_file(&*store, &project).map_err(platform_err)?;
 
+    let mut load_error = None;
     let glue: Shared = Rc::new_cyclic(|me| {
-        let session = Glue::load(&*store, me, &project, &file)
-            .unwrap_or_else(|_| Session::new(Document::new(PathBuf::from("main.slint"), String::new())));
+        let loaded = Glue::load(&*store, me, &project, &file);
+        let ok = loaded.is_ok();
+        let session = loaded.unwrap_or_else(|e| {
+            load_error = Some(e);
+            Session::new(Document::new(PathBuf::from(&file), String::new()))
+        });
         RefCell::new(Glue {
+            loaded: ok,
             editor: editor.as_weak(),
             store,
             me: me.clone(),
@@ -305,7 +349,10 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
     {
         let mut g = glue.borrow_mut();
         g.refresh_lists();
-        g.rebuild();
+        match load_error {
+            None => g.rebuild(),
+            Some(e) => g.set_error(&format!("Cannot open {e}")),
+        }
     }
 
     let weak = Rc::downgrade(&glue);

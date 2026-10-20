@@ -143,6 +143,7 @@ dependencies = [
  "slint-build",
  "slint-doc",
  "storage",
+ "tempfile",
  "thiserror 2.0.21",
  "tidy",
 ]

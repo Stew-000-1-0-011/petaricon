@@ -50,13 +50,20 @@ export component Canvas inherits Rectangle {
     property <length> ov-h: root.resizing
         ? max(4px, root.base-h + (root.top-moves ? -root.drag-dy : root.drag-dy)) : root.base-h;
 
+    // Corner handles win only near a corner; the radius shrinks for small selections so the
+    // interior stays draggable. The nearest corner wins.
     function corner-at(px: length, py: length) -> int {
         if !root.has-selection { return -1; }
-        if abs(px - root.base-x) < 24px && abs(py - root.base-y) < 24px { return 0; }
-        if abs(px - (root.base-x + root.base-w)) < 24px && abs(py - root.base-y) < 24px { return 1; }
-        if abs(px - root.base-x) < 24px && abs(py - (root.base-y + root.base-h)) < 24px { return 2; }
-        if abs(px - (root.base-x + root.base-w)) < 24px && abs(py - (root.base-y + root.base-h)) < 24px { return 3; }
-        return -1;
+        // Pick the nearest corner of the selection.
+        let r = min(24px, min(root.base-w, root.base-h) / 3);
+        let left-d = abs(px - root.base-x);
+        let right-d = abs(px - (root.base-x + root.base-w));
+        let top-d = abs(py - root.base-y);
+        let bottom-d = abs(py - (root.base-y + root.base-h));
+        let dx = min(left-d, right-d);
+        let dy = min(top-d, bottom-d);
+        if dx > r || dy > r { return -1; }
+        return (left-d <= right-d ? 0 : 1) + (top-d <= bottom-d ? 0 : 2);
     }
 
     function inside-selection(px: length, py: length) -> bool {
