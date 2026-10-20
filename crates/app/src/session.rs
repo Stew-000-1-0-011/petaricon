@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use preview::{Diagnostic, Hit, LiveInstance, compile};
-use slint_doc::{Document, EditError, ElementKind, ElementPath, Op};
+use slint_doc::{Document, EditError, ElementInfo, ElementKind, ElementPath, Op, TreeNode};
 
 const MIN_SIZE: f32 = 4.0;
 const TAP_THRESHOLD: f32 = 8.0;
@@ -26,6 +26,57 @@ pub enum SessionError {
     #[error("compile failed")]
     Compile(Vec<Diagnostic>),
 }
+
+/// One row of the element tree, in depth-first display order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeRow {
+    pub path: ElementPath,
+    pub depth: usize,
+    /// `"id := Type"` or `"Type"`.
+    pub label: String,
+    pub is_layout: bool,
+}
+
+/// Operations of a tree row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeAction {
+    /// Reorder within the same parent.
+    Up,
+    Down,
+    /// Become the next sibling of the parent.
+    Out,
+    /// Become the last child of the previous sibling, which must be a container.
+    In,
+    Delete,
+    /// Append a new `Rectangle` to the element's parent.
+    NewContainer,
+}
+
+/// Standard palette entries, in display order.
+pub const STD_PALETTE: [&str; 13] = [
+    "Rectangle",
+    "Text",
+    "Image",
+    "TouchArea",
+    "HorizontalLayout",
+    "VerticalLayout",
+    "Button",
+    "CheckBox",
+    "Slider",
+    "SpinBox",
+    "LineEdit",
+    "ComboBox",
+    "Switch",
+];
+
+/// Palette entries that live in `std-widgets.slint` and need an import.
+const STD_WIDGETS: [&str; 7] = [
+    "Button", "CheckBox", "Slider", "SpinBox", "LineEdit", "ComboBox", "Switch",
+];
+
+/// Assumed size of a freshly inserted element (its real size is unknown before compiling).
+const NEW_SIZE: f32 = 40.0;
+const PLACE_STEP: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Corner {
@@ -307,4 +358,262 @@ impl Session {
         self.revalidate();
         r
     }
+
+    pub fn select_path(&mut self, path: ElementPath) {
+        if self.doc.element(&path).is_some() {
+            self.selection = Some(path);
+        }
+    }
+
+    pub fn tree_rows(&self) -> Vec<TreeRow> {
+        fn walk(n: &TreeNode, depth: usize, out: &mut Vec<TreeRow>) {
+            let label = match &n.info.id {
+                Some(id) => format!("{id} := {}", n.info.type_name),
+                None => n.info.type_name.clone(),
+            };
+            out.push(TreeRow {
+                path: n.info.path.clone(),
+                depth,
+                label,
+                is_layout: matches!(n.info.kind, ElementKind::Layout(_)),
+            });
+            for c in &n.children {
+                walk(c, depth + 1, out);
+            }
+        }
+        let mut out = Vec::new();
+        if let Some(t) = self.doc.tree(&self.component) {
+            walk(&t, 0, &mut out);
+        }
+        out
+    }
+
+    /// The standard parts followed by the other components of the document.
+    pub fn palette(&self) -> Vec<String> {
+        let mut v: Vec<String> = STD_PALETTE.iter().map(|s| s.to_string()).collect();
+        v.extend(
+            self.doc
+                .components()
+                .into_iter()
+                .map(|c| c.name)
+                .filter(|n| *n != self.component),
+        );
+        v
+    }
+
+    /// A container (palette insertion goes inside it) is a component root, a `Rectangle`,
+    /// `TouchArea`, `Window` or any layout; every other element is a leaf.
+    fn is_container(info: &ElementInfo) -> bool {
+        info.path.indices.is_empty()
+            || matches!(info.kind, ElementKind::Layout(_))
+            || matches!(info.type_name.as_str(), "Rectangle" | "TouchArea" | "Window")
+    }
+
+    fn local_rect_of(&self, path: &ElementPath) -> Option<(f32, f32, f32, f32)> {
+        let info = self.snapshot.borrow().element(path)?;
+        let hit = self.live.borrow().as_ref()?.geometry(info.start)?;
+        Some((hit.local.x, hit.local.y, hit.local.w, hit.local.h))
+    }
+
+    /// First 8px-grid position (x first, then y) where an assumed 40x40 element fits inside
+    /// `parent` without overlapping or touching its existing children.
+    fn free_position(&self, parent: &ElementPath, child_count: usize) -> (i32, i32) {
+        let Some((_, _, pw, ph)) = self.local_rect_of(parent) else {
+            return (PLACE_STEP as i32, PLACE_STEP as i32);
+        };
+        let kids: Vec<_> = (0..child_count)
+            .filter_map(|i| {
+                let mut p = parent.clone();
+                p.indices.push(i);
+                self.local_rect_of(&p)
+            })
+            .collect();
+        let mut y = PLACE_STEP;
+        while y + NEW_SIZE <= ph {
+            let mut x = PLACE_STEP;
+            while x + NEW_SIZE <= pw {
+                let overlaps = kids.iter().any(|&(kx, ky, kw, kh)| {
+                    x <= kx + kw && kx <= x + NEW_SIZE && y <= ky + kh && ky <= y + NEW_SIZE
+                });
+                if !overlaps {
+                    return (x as i32, y as i32);
+                }
+                x += PLACE_STEP;
+            }
+            y += PLACE_STEP;
+        }
+        (PLACE_STEP as i32, PLACE_STEP as i32)
+    }
+
+    fn refuse_if_stale(&self) -> Result<(), SessionError> {
+        if self.diagnostics.is_empty() {
+            Ok(())
+        } else {
+            Err(SessionError::Compile(self.diagnostics.clone()))
+        }
+    }
+
+    /// Inserts `name` at the end of `parent`, adding the `std-widgets.slint` import when needed,
+    /// as a single history step. Selects the new element.
+    fn insert_part(&mut self, parent: ElementPath, name: &str) -> Result<(), SessionError> {
+        self.refuse_if_stale()?;
+        let parent_info = self
+            .doc
+            .element(&parent)
+            .ok_or_else(|| EditError::ElementNotFound(parent.clone()))?;
+        let mut props = Vec::new();
+        if !matches!(parent_info.kind, ElementKind::Layout(_)) {
+            let (x, y) = self.free_position(&parent, parent_info.child_count);
+            props.push(format!("x: {x}px;"));
+            props.push(format!("y: {y}px;"));
+        }
+        match name {
+            "Rectangle" | "TouchArea" => {
+                props.push("width: 40px;".into());
+                props.push("height: 40px;".into());
+                if name == "Rectangle" {
+                    props.push("background: #808890;".into());
+                }
+            }
+            "Text" => props.push("text: \"Text\";".into()),
+            "Button" => props.push("text: \"Button\";".into()),
+            "CheckBox" => props.push("text: \"CheckBox\";".into()),
+            "Switch" => props.push("text: \"Switch\";".into()),
+            _ => {}
+        }
+        let source = if props.is_empty() {
+            format!("{name} {{ }}")
+        } else {
+            format!("{name} {{ {} }}", props.join(" "))
+        };
+        // Edit a scratch copy so the insert and the import land in one history step.
+        let mut scratch = Document::new(self.doc.path().to_path_buf(), self.doc.text().to_string());
+        let new_path = scratch
+            .apply(Op::InsertElement { parent, index: None, source })?
+            .ok_or_else(|| EditError::InvalidTarget("insert returned no path".into()))?;
+        let mut text = scratch.text().to_string();
+        if STD_WIDGETS.contains(&name) {
+            text = with_std_import(&text, name);
+        }
+        self.doc.replace_text(text);
+        self.selection = Some(new_path);
+        Ok(())
+    }
+
+    /// Adds a part: into the selection when it is a container, else into its parent (the
+    /// component root when nothing is selected).
+    pub fn add_from_palette(&mut self, name: &str) -> Result<(), SessionError> {
+        self.refuse_if_stale()?;
+        let target = match &self.selection {
+            None => ElementPath { component: self.component.clone(), indices: vec![] },
+            Some(sel) => {
+                let info = self
+                    .doc
+                    .element(sel)
+                    .ok_or_else(|| EditError::ElementNotFound(sel.clone()))?;
+                if Self::is_container(&info) {
+                    sel.clone()
+                } else {
+                    let mut p = sel.clone();
+                    p.indices.pop();
+                    p
+                }
+            }
+        };
+        self.insert_part(target, name)
+    }
+
+    pub fn tree_action(&mut self, path: &ElementPath, action: TreeAction) -> Result<(), SessionError> {
+        let root_err = || {
+            SessionError::Edit(EditError::InvalidTarget(
+                "the root element cannot be moved or removed".into(),
+            ))
+        };
+        let Some((&index, parent_indices)) = path.indices.split_last() else {
+            return match action {
+                TreeAction::NewContainer => self.insert_part(path.clone(), "Rectangle"),
+                _ => Err(root_err()),
+            };
+        };
+        let parent = ElementPath { component: path.component.clone(), indices: parent_indices.to_vec() };
+        let nothing = |what: &str| {
+            SessionError::Edit(EditError::InvalidTarget(format!("cannot move {what}")))
+        };
+        match action {
+            TreeAction::Up => {
+                if index == 0 {
+                    return Err(nothing("further up"));
+                }
+                self.apply(Op::MoveElement {
+                    path: path.clone(),
+                    new_parent: parent,
+                    index: Some(index - 1),
+                })
+            }
+            TreeAction::Down => {
+                let count = self.doc.element(&parent).map_or(0, |p| p.child_count);
+                if index + 1 >= count {
+                    return Err(nothing("further down"));
+                }
+                self.apply(Op::MoveElement {
+                    path: path.clone(),
+                    new_parent: parent,
+                    index: Some(index + 1),
+                })
+            }
+            TreeAction::Out => {
+                let Some((&parent_index, grand)) = parent.indices.split_last() else {
+                    return Err(nothing("out of the root"));
+                };
+                let grandparent = ElementPath { component: path.component.clone(), indices: grand.to_vec() };
+                self.apply(Op::MoveElement {
+                    path: path.clone(),
+                    new_parent: grandparent,
+                    index: Some(parent_index + 1),
+                })
+            }
+            TreeAction::In => {
+                if index == 0 {
+                    return Err(nothing("in: no previous sibling"));
+                }
+                let mut sibling = parent;
+                sibling.indices.push(index - 1);
+                let info = self
+                    .doc
+                    .element(&sibling)
+                    .ok_or_else(|| EditError::ElementNotFound(sibling.clone()))?;
+                if !Self::is_container(&info) {
+                    return Err(SessionError::NotAContainer);
+                }
+                self.apply(Op::MoveElement { path: path.clone(), new_parent: sibling, index: None })
+            }
+            TreeAction::Delete => {
+                self.apply(Op::RemoveElement { path: path.clone() })?;
+                self.selection = Some(parent);
+                self.revalidate();
+                Ok(())
+            }
+            TreeAction::NewContainer => self.insert_part(parent, "Rectangle"),
+        }
+    }
+}
+
+/// Adds `name` to the `import { ... } from "std-widgets.slint";` line, creating the line at the
+/// top of the file when there is none.
+fn with_std_import(text: &str, name: &str) -> String {
+    const MODULE: &str = "\"std-widgets.slint\"";
+    if let Some(from) = text.find(MODULE)
+        && let Some(close) = text[..from].rfind('}')
+        && let Some(open) = text[..close].rfind('{')
+        && text[..open].trim_end().ends_with("import")
+    {
+        let names = &text[open + 1..close];
+        if names.split(',').any(|n| n.trim() == name) {
+            return text.to_string();
+        }
+        let head = text[..close].trim_end();
+        let sep = if names.trim().is_empty() { " " } else { ", " };
+        return format!("{head}{sep}{name} {}", &text[close..]);
+    }
+    format!("import {{ {name} }} from {MODULE};\n{text}")
 }

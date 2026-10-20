@@ -225,3 +225,150 @@ fn rebuild_swaps_snapshot_only_when_the_factory_runs() {
     // 10 + 40 snapped to the 4px grid.
     assert_eq!((after.x, after.y), (52., 52.));
 }
+
+const PALETTE_SRC: &str = r#"export component Main inherits Rectangle {
+    width: 300px;
+    height: 300px;
+    box := Rectangle {
+        width: 200px;
+        height: 200px;
+        Rectangle {
+            x: 8px;
+            y: 8px;
+            width: 40px;
+            height: 40px;
+        }
+    }
+    VerticalLayout {
+        Text { text: "a"; }
+        Text { text: "b"; }
+    }
+}
+
+component Card inherits Rectangle { }
+"#;
+
+fn palette_session(src: &str) -> Session {
+    i_slint_backend_testing::init_no_event_loop();
+    let mut s = Session::new(Document::new(PathBuf::from("/t/main.slint"), src.into()));
+    assert!(s.rebuild_standalone(300., 300.));
+    s
+}
+
+fn select(s: &mut Session, p: &[usize]) {
+    s.select_path(path(p));
+}
+
+#[test]
+fn palette_adds_into_free_container_without_overlap() {
+    let mut s = palette_session(PALETTE_SRC);
+    select(&mut s, &[0]);
+    s.add_from_palette("Button").unwrap();
+    let t = s.doc().text();
+    assert!(
+        t.starts_with("import { Button } from \"std-widgets.slint\";\n"),
+        "{t}"
+    );
+    let el = s.doc().element(&path(&[0, 1])).unwrap();
+    let b = |n: &str| el.bindings.iter().find(|b| b.name == n).map(|b| b.expr.clone());
+    assert_eq!(el.type_name, "Button");
+    assert_eq!(b("x").as_deref(), Some("56px"));
+    assert_eq!(b("y").as_deref(), Some("8px"));
+    assert_eq!(s.selection(), Some(&path(&[0, 1])));
+    // One undo step removes both the element and the import.
+    assert!(s.undo());
+    assert_eq!(s.doc().text(), PALETTE_SRC);
+}
+
+#[test]
+fn palette_adds_std_widget_to_existing_import() {
+    let src = format!("import {{ LineEdit, ListView }} from \"std-widgets.slint\";\n{PALETTE_SRC}");
+    let mut s = palette_session(&src);
+    select(&mut s, &[0]);
+    s.add_from_palette("Slider").unwrap();
+    let t = s.doc().text();
+    assert!(
+        t.starts_with("import { LineEdit, ListView, Slider } from \"std-widgets.slint\";\n"),
+        "{t}"
+    );
+    // Already imported: no duplicate.
+    s.add_from_palette("Slider").unwrap();
+    assert_eq!(s.doc().text().matches("Slider }").count(), 1);
+}
+
+#[test]
+fn palette_into_non_container_goes_to_parent_and_layout_has_no_xy() {
+    let mut s = palette_session(PALETTE_SRC);
+    select(&mut s, &[1, 0]); // Text in the VerticalLayout
+    s.add_from_palette("Rectangle").unwrap();
+    assert_eq!(s.selection(), Some(&path(&[1, 2])));
+    let el = s.doc().element(&path(&[1, 2])).unwrap();
+    assert!(el.bindings.iter().all(|b| b.name != "x" && b.name != "y"));
+    assert!(!s.doc().text().contains("import"));
+}
+
+#[test]
+fn palette_lists_standard_then_other_components() {
+    let s = palette_session(PALETTE_SRC);
+    let p = s.palette();
+    assert_eq!(p[0], "Rectangle");
+    assert_eq!(p[12], "Switch");
+    assert_eq!(&p[13..], ["Card"]);
+}
+
+#[test]
+fn palette_refused_while_stale() {
+    let mut s = palette_session(PALETTE_SRC);
+    s.replace_text(format!("{PALETTE_SRC}\nexport component Broken {{ Text {{ text: 1 +; }} }}\n"));
+    assert!(!s.rebuild_standalone(300., 300.));
+    let before = s.doc().text().to_string();
+    assert!(matches!(s.add_from_palette("Button"), Err(SessionError::Compile(_))));
+    assert_eq!(s.doc().text(), before);
+}
+
+#[test]
+fn tree_rows_order_and_labels() {
+    let s = palette_session(PALETTE_SRC);
+    let rows = s.tree_rows();
+    let got: Vec<(String, usize, bool)> =
+        rows.iter().map(|r| (r.label.clone(), r.depth, r.is_layout)).collect();
+    let want = [
+        ("Rectangle", 0, false),
+        ("box := Rectangle", 1, false),
+        ("Rectangle", 2, false),
+        ("VerticalLayout", 1, true),
+        ("Text", 2, false),
+        ("Text", 2, false),
+    ];
+    assert_eq!(
+        got,
+        want.iter().map(|(l, d, y)| (l.to_string(), *d, *y)).collect::<Vec<_>>()
+    );
+    assert_eq!(rows[2].path, path(&[0, 0]));
+}
+
+#[test]
+fn tree_actions_move_keep_selection_and_delete() {
+    use app::session::TreeAction::*;
+    let mut s = palette_session(PALETTE_SRC);
+    // Down: box swaps with the layout.
+    s.tree_action(&path(&[0]), Down).unwrap();
+    assert_eq!(s.selection(), Some(&path(&[1])));
+    assert_eq!(s.doc().element(&path(&[1])).unwrap().id.as_deref(), Some("box"));
+    s.tree_action(&path(&[1]), Up).unwrap();
+    assert_eq!(s.selection(), Some(&path(&[0])));
+    assert!(s.tree_action(&path(&[0]), Up).is_err());
+    // In: the layout goes into box (previous sibling container).
+    s.tree_action(&path(&[1]), In).unwrap();
+    assert_eq!(s.selection(), Some(&path(&[0, 1])));
+    // Out: and back after box.
+    s.tree_action(&path(&[0, 1]), Out).unwrap();
+    assert_eq!(s.selection(), Some(&path(&[1])));
+    // New container next to the selection, in its parent.
+    s.tree_action(&path(&[1]), NewContainer).unwrap();
+    assert_eq!(s.selection(), Some(&path(&[2])));
+    assert_eq!(s.doc().element(&path(&[2])).unwrap().type_name, "Rectangle");
+    s.tree_action(&path(&[2]), Delete).unwrap();
+    assert!(s.doc().element(&path(&[2])).is_none());
+    assert!(s.tree_action(&path(&[]), Delete).is_err());
+}

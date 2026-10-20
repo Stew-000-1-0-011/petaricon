@@ -1,5 +1,6 @@
 import { Canvas } from "canvas.slint";
-import { BottomPanel, ToolButton, MenuList, NewProject } from "panels.slint";
+import { BottomPanel, ToolButton, MenuList, NewProject, TreeRowItem } from "panels.slint";
+export { TreeRowItem }
 
 export component Editor inherits Window {
     title: "Petaricon Editor";
@@ -23,6 +24,8 @@ export component Editor inherits Window {
     in property <string> current-component;
     in property <string> message;
     in property <bool> dirty;
+    in property <[TreeRowItem]> tree-rows;
+    in property <[string]> palette;
     in property <float> zoom-level: 1.0;
 
     callback tapped(length, length);
@@ -36,6 +39,9 @@ export component Editor inherits Window {
     callback create-project(string);
     callback choose-component(string);
     callback zoom(float /* multiplier */);
+    callback tree-selected(int /* row */);
+    callback tree-action(int /* TreeAction */);
+    callback palette-picked(string);
 
     property <bool> menu-open;
     property <string> menu-project: root.current-project;
@@ -120,6 +126,11 @@ export component Editor inherits Window {
         handle-visible: !root.wide;
         max-h: root.content-h * 0.7;
         panel-h <=> root.panel-h;
+        tree-rows: root.tree-rows;
+        palette: root.palette;
+        tree-selected(i) => { root.tree-selected(i); }
+        tree-action(a) => { root.tree-action(a); }
+        palette-picked(n) => { root.palette-picked(n); }
     }
 
     if root.menu-open: Rectangle {

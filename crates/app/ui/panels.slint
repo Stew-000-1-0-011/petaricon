@@ -1,5 +1,12 @@
 import { LineEdit, ListView } from "std-widgets.slint";
 
+export struct TreeRowItem {
+    label: string,
+    depth: int,
+    is-layout: bool,
+    selected: bool,
+}
+
 export component ToolButton inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
@@ -27,6 +34,12 @@ export component BottomPanel inherits Rectangle {
     in property <length> max-h;
     in property <bool> handle-visible: true;
     in-out property <int> tab: 0;
+    in property <[TreeRowItem]> tree-rows;
+    in property <[string]> palette;
+    callback tree-selected(int);
+    // 0 up, 1 down, 2 out, 3 in, 4 delete, 5 new container
+    callback tree-action(int);
+    callback palette-picked(string);
     property <[string]> tab-names: ["Tree", "Parts", "Props", "Source"];
     property <length> start-y;
     property <length> start-h;
@@ -73,7 +86,50 @@ export component BottomPanel inherits Rectangle {
         }
         Rectangle {
             vertical-stretch: 1;
-            // Tab contents arrive in later milestones.
+            clip: true;
+            if root.tab == 0: VerticalLayout {
+                padding: 4px;
+                spacing: 4px;
+                HorizontalLayout {
+                    spacing: 3px;
+                    height: 34px;
+                    ToolButton { text: "Up"; clicked => { root.tree-action(0); } }
+                    ToolButton { text: "Down"; clicked => { root.tree-action(1); } }
+                    ToolButton { text: "Out"; clicked => { root.tree-action(2); } }
+                    ToolButton { text: "In"; clicked => { root.tree-action(3); } }
+                    ToolButton { text: "Del"; clicked => { root.tree-action(4); } }
+                    ToolButton { text: "Box+"; clicked => { root.tree-action(5); } }
+                }
+                ListView {
+                    for row[i] in root.tree-rows: Rectangle {
+                        height: 34px;
+                        background: row.selected ? #3a4a5c : transparent;
+                        Text {
+                            x: 8px + row.depth * 16px;
+                            width: parent.width - self.x - 4px;
+                            text: row.label;
+                            color: row.is-layout ? #8fc7ff : white;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        TouchArea { clicked => { root.tree-selected(i); } }
+                    }
+                }
+            }
+            if root.tab == 1: ListView {
+                for name in root.palette: Rectangle {
+                    height: 38px;
+                    Text {
+                        x: 12px;
+                        text: "+  " + name;
+                        color: white;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                    }
+                    TouchArea { clicked => { root.palette-picked(name); } }
+                }
+            }
         }
     }
 }

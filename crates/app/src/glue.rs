@@ -9,8 +9,8 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use slint_doc::Document;
 use storage::ProjectStore;
 
-use crate::Editor;
-use crate::session::{Corner, Session};
+use crate::session::{Corner, Session, TreeAction, TreeRow};
+use crate::{Editor, TreeRowItem};
 
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 4.0;
@@ -151,7 +151,26 @@ impl Glue {
         ));
     }
 
+    fn refresh_tree(&self) {
+        let ed = self.editor();
+        let sel = self.session.selection();
+        let rows: Vec<TreeRowItem> = self
+            .session
+            .tree_rows()
+            .into_iter()
+            .map(|r: TreeRow| TreeRowItem {
+                selected: sel == Some(&r.path),
+                label: r.label.into(),
+                depth: r.depth as i32,
+                is_layout: r.is_layout,
+            })
+            .collect();
+        ed.set_tree_rows(ModelRc::new(VecModel::from(rows)));
+        ed.set_palette(to_model(self.session.palette()));
+    }
+
     pub fn update_overlay(&self) {
+        self.refresh_tree();
         let ed = self.editor();
         match self.session.selection_hit() {
             Some(hit) => {
@@ -235,6 +254,37 @@ impl Glue {
         }
     }
 
+    fn tree_selected(&mut self, row: i32) {
+        self.editor().set_message("".into());
+        if let Some(r) = self.session.tree_rows().into_iter().nth(row as usize) {
+            self.session.select_path(r.path);
+        }
+        self.update_overlay();
+    }
+
+    fn tree_action(&mut self, action: i32) {
+        self.editor().set_message("".into());
+        let action = match action {
+            0 => TreeAction::Up,
+            1 => TreeAction::Down,
+            2 => TreeAction::Out,
+            3 => TreeAction::In,
+            4 => TreeAction::Delete,
+            _ => TreeAction::NewContainer,
+        };
+        let r = match self.session.selection().cloned() {
+            Some(p) => self.session.tree_action(&p, action),
+            None => Err(crate::session::SessionError::NoSelection),
+        };
+        self.after_edit(r);
+    }
+
+    fn palette_picked(&mut self, name: &str) {
+        self.editor().set_message("".into());
+        let r = self.session.add_from_palette(name);
+        self.after_edit(r);
+    }
+
     fn tapped(&mut self, x: f32, y: f32) {
         self.editor().set_message("".into());
         self.session.tap(x / self.zoom, y / self.zoom);
@@ -310,6 +360,9 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_select_project, |g, p| g.select_project(&p));
     on!(on_create_project, |g, n| g.create_project(&n));
     on!(on_choose_component, |g, c| g.choose_component(&c));
+    on!(on_tree_selected, |g, i| g.tree_selected(i));
+    on!(on_tree_action, |g, a| g.tree_action(a));
+    on!(on_palette_picked, |g, n| g.palette_picked(&n));
     on!(on_zoom, |g, m| g.zoom_by(m));
 }
 
