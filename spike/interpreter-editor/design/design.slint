@@ -1,0 +1,31 @@
+// The design document edited by the spike. Loaded at runtime by slint-interpreter.
+import { Button, Slider } from "std-widgets.slint";
+
+component Chip inherits Rectangle {
+    in property <string> label;
+    width: 96px;
+    height: 40px;
+    border-radius: 20px;
+    background: #2d6cdf;
+    Text { text: root.label; color: white; }
+}
+
+export component Design inherits Rectangle {
+    background: #f4f4f4;
+
+    Text { x: 16px; y: 12px; text: "Robot panel (free area)"; font-size: 18px; }
+    Chip { x: 20px; y: 60px; label: "Arm"; }
+    Chip { x: 140px; y: 64px; label: "Base"; }
+    Button { x: 24px; y: 130px; width: 120px; text: "Stop"; }
+    Rectangle { x: 180px; y: 120px; width: 80px; height: 80px; background: #e0a030; border-radius: 8px; }
+
+    VerticalLayout {
+        y: 240px;
+        height: 160px;
+        padding: 12px;
+        spacing: 8px;
+        Text { text: "Layout area (not movable)"; }
+        Slider { value: 0.4; }
+        Button { text: "In layout"; }
+    }
+}

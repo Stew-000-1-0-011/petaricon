@@ -1,0 +1,92 @@
+import { Button } from "std-widgets.slint";
+
+export component Editor inherits Window {
+    title: "Interpreter editor spike";
+    preferred-width: 480px;
+    preferred-height: 800px;
+    background: #202428;
+
+    in property <component-factory> factory;
+    in property <string> status: "starting...";
+    in property <string> selection-text: "tap an element";
+    in property <bool> has-selection;
+    // Selection rectangle, relative to the design area.
+    in property <length> sel-x;
+    in property <length> sel-y;
+    in property <length> sel-w;
+    in property <length> sel-h;
+
+    callback tapped(length, length);
+    callback drag-finished(length, length);
+    callback bench();
+    callback reload();
+
+    property <length> drag-dx;
+    property <length> drag-dy;
+
+    VerticalLayout {
+        padding-top: 32px;
+        padding-bottom: 48px;
+
+        Text {
+            text: root.status;
+            color: #7CFC00;
+            wrap: word-wrap;
+            font-size: 13px;
+        }
+        Text {
+            text: root.selection-text;
+            color: white;
+            wrap: word-wrap;
+            font-size: 13px;
+        }
+
+        area := Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+
+            ComponentContainer {
+                width: parent.width;
+                height: parent.height;
+                component-factory: root.factory;
+            }
+
+            if root.has-selection: Rectangle {
+                x: root.sel-x + root.drag-dx;
+                y: root.sel-y + root.drag-dy;
+                width: root.sel-w;
+                height: root.sel-h;
+                border-width: 2px;
+                border-color: #e020e0;
+                background: #e020e020;
+            }
+
+            touch := TouchArea {
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.down {
+                        root.drag-dx = 0;
+                        root.drag-dy = 0;
+                        root.tapped(self.mouse-x, self.mouse-y);
+                    } else if e.kind == PointerEventKind.up {
+                        if root.has-selection && (abs(root.drag-dx) > 2px || abs(root.drag-dy) > 2px) {
+                            root.drag-finished(root.drag-dx, root.drag-dy);
+                        }
+                        root.drag-dx = 0;
+                        root.drag-dy = 0;
+                    }
+                }
+                moved => {
+                    root.drag-dx = self.mouse-x - self.pressed-x;
+                    root.drag-dy = self.mouse-y - self.pressed-y;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            padding: 8px;
+            spacing: 8px;
+            Button { text: "Recompile x10"; clicked => { root.bench(); } }
+            Button { text: "Reset design"; clicked => { root.reload(); } }
+        }
+    }
+}
