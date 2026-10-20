@@ -493,10 +493,10 @@ impl Session {
     }
 
     fn revalidate(&mut self) {
-        if let Some(s) = &self.selection {
-            if self.doc.element(s).is_none() {
-                self.selection = None;
-            }
+        if let Some(s) = &self.selection
+            && self.doc.element(s).is_none()
+        {
+            self.selection = None;
         }
     }
 

@@ -1,0 +1,86 @@
+# Petaricon Editor
+
+スマホ単体でも使える `.slint` のノーコードエディタです。Rust と Slint で書かれていて、Android と PC の両方で動きます。キャンバスでは `slint-interpreter` が本物の描画を行い、編集結果は人が読んで手直しできる `.slint` テキストとして保存されます。知らない記述は変更せずそのまま残します。
+
+設計は `docs/superpowers/specs/2026-10-20-slint-touch-editor-design.md` を参照してください。
+
+## 基本的な使い方
+
+1. プロジェクトを作る(または開く)。
+2. 「Parts」タブから部品を追加し、キャンバスの上でラフに配置する(ドラッグで移動、四隅のハンドルでサイズ変更)。
+3. コンテナを選んで **Tidy** を押す。子要素が `HorizontalLayout` / `VerticalLayout` に整形される。
+4. レイアウトのガイドに出る数値(spacing、padding)をタップして、数値で調整する。
+5. 繰り返したい部分を選んで **Extract** を押し、`component` に切り出す。必要なら `in property` と `callback` も宣言する。
+6. **Save** で保存する。
+
+整形を取り消したいときは **Untidy**(現在の見た目の位置で自由配置に戻す)か **Undo** を使います。
+
+## PC で動かす
+
+```sh
+cargo run -p app -- <プロジェクトのフォルダ>
+```
+
+フォルダを省略すると `./projects` を使います。ログは `./logs/` に出ます。
+
+## APK のビルド
+
+必要なもの: Rust のターゲット `aarch64-linux-android`、`cargo-apk`、Android SDK と NDK。
+
+```sh
+export ANDROID_HOME=<Android SDK のパス>
+export ANDROID_NDK_ROOT=<NDK のパス>
+cd crates/app
+cargo apk build --release --lib --target aarch64-linux-android
+```
+
+出力は `target/release/apk/app.apk` です。release ビルドは `~/.android/debug.keystore`(パスワード `android`)で署名します(`crates/app/Cargo.toml` の `package.metadata.android.signing.release`)。キーストアがなければ次で作ります。
+
+```sh
+keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey \
+  -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+```
+
+パッケージ名は `dev.petaricon.editor`、表示名は `Petaricon Editor`、`min_sdk_version` は 26、`target_sdk_version` は 35 です。
+
+## 実機へのインストール
+
+USB デバッグを有効にして接続し、次を実行します。
+
+```sh
+adb install -r target/release/apk/app.apk
+```
+
+APK ファイルをスマホへコピーして、ファイルアプリから開いてもかまいません(提供元不明のアプリの許可が必要です)。
+
+## 保存先と USB での受け渡し
+
+- Android: `Android/data/dev.petaricon.editor/files/projects/<プロジェクト名>/*.slint`。権限は不要です。PC と USB 接続して(ファイル転送モード)、この場所を開くと `.slint` を読み書きできます。
+- PC: 起動引数で指定したフォルダ(省略時 `./projects`)。
+
+保存のたびに直前の版を `<ファイル名>.slint.bak` として 1 世代残します。未保存の内容は数秒ごとに `<プロジェクト>/.recovery/<ファイル名>` へ書き出され、次回起動時に復元するか確認されます。アプリがバックグラウンドに回ったときにも自動で保存します。
+
+## ログ
+
+Rust のパニックは `crash-<unix 秒>.log` としてログフォルダに記録されます。
+
+- Android: `Android/data/dev.petaricon.editor/files/logs/`
+- PC: `./logs/`(起動したカレントディレクトリ)
+
+## 既知の制約
+
+- `ComponentContainer` / `component-factory` は Slint 1.18 では実験的機能です。`app` の `.slint` が使うため、`crates/app/build.rs` で `SLINT_ENABLE_EXPERIMENTAL_FEATURES` を設定しています。
+- 要素の位置の取得に `slint-interpreter` の非公開 API(`internal` / `internal-highlight`)を使っています。使ってよいのは `preview` クレートだけです。
+- Slint 系クレートは `=1.18.1` に完全一致で固定しています。更新は意図して行い、`preview` のテストで確認してください。
+- 作らないもの: GitHub 連携、`for` / `if` / アニメーション / `states` の GUI 編集(テキストでは書けます)、GridLayout への整形、複数選択。子に `for` / `if` を含むコンテナの整形は断られます。
+- ライセンス: `slint-interpreter` と `i-slint-compiler` は GPLv3 または Slint ロイヤリティフリーライセンスです。個人利用向けです。配布・販売する場合は事前に確認してください。
+
+## クレート構成
+
+| クレート | 役割 |
+|---|---|
+| `slint-doc` | `.slint` テキストの編集操作と履歴(Slint の UI に依存しない) |
+| `tidy` | 整形の幾何計算(Slint に依存しない) |
+| `preview` | interpreter の包み。コンパイル、埋め込み、ヒットテスト |
+| `storage` | 保存先(ローカルファイル) |
+| `app` | エディタ画面と、Android / PC の起動部分 |

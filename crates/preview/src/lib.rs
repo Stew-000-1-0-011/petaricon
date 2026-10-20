@@ -206,10 +206,10 @@ impl LiveInstance {
         ) -> Option<Vec<Hit>> {
             for c in &kids(e) {
                 if let Some(mut chain) = walk(li, c, p, depth + 1) {
-                    if depth > 0 {
-                        if let Some(h) = li.own_hit(e, p) {
-                            chain.push(h);
-                        }
+                    if depth > 0
+                        && let Some(h) = li.own_hit(e, p)
+                    {
+                        chain.push(h);
                     }
                     return Some(chain);
                 }

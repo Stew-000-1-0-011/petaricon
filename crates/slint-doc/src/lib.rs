@@ -322,11 +322,11 @@ fn find(element: &SyntaxNode, offset: u32) -> Option<Vec<usize>> {
         return Some(vec![]);
     }
     for (i, c) in syntax::element_children(element).iter().enumerate() {
-        if let Some(inner) = syntax::inner_element(c) {
-            if let Some(mut rest) = find(&inner, offset) {
-                rest.insert(0, i);
-                return Some(rest);
-            }
+        if let Some(inner) = syntax::inner_element(c)
+            && let Some(mut rest) = find(&inner, offset)
+        {
+            rest.insert(0, i);
+            return Some(rest);
         }
     }
     None
