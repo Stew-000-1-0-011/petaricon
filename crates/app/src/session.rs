@@ -599,7 +599,10 @@ impl Session {
 }
 
 /// Adds `name` to the `import { ... } from "std-widgets.slint";` line, creating the line at the
-/// top of the file when there is none.
+/// top of the file when there is none. Everything else in the file stays byte-identical:
+/// the name is inserted right after the last entry, matching a multi-line layout and a
+/// trailing comma when the import uses them. An entry already imported (also under an alias,
+/// `Button as B`) is left alone.
 fn with_std_import(text: &str, name: &str) -> String {
     const MODULE: &str = "\"std-widgets.slint\"";
     if let Some(from) = text.find(MODULE)
@@ -608,12 +611,33 @@ fn with_std_import(text: &str, name: &str) -> String {
         && text[..open].trim_end().ends_with("import")
     {
         let names = &text[open + 1..close];
-        if names.split(',').any(|n| n.trim() == name) {
+        if names.split(',').any(|n| n.split_whitespace().next() == Some(name)) {
             return text.to_string();
         }
-        let head = text[..close].trim_end();
-        let sep = if names.trim().is_empty() { " " } else { ", " };
-        return format!("{head}{sep}{name} {}", &text[close..]);
+        let (at, insert) = match names.rfind(|c: char| !c.is_whitespace()) {
+            None if names.is_empty() => (open + 1, format!(" {name} ")),
+            None => (close, format!("{name} ")),
+            Some(last) => {
+                let trailing_comma = names[last..].starts_with(',');
+                let at = open + 1 + last + 1;
+                let insert = if names.contains('\n') {
+                    let line_start = names[..last].rfind('\n').map_or(0, |n| n + 1);
+                    let line = &names[line_start..];
+                    let indent = &line[..line.len() - line.trim_start().len()];
+                    if trailing_comma {
+                        format!("\n{indent}{name},")
+                    } else {
+                        format!(",\n{indent}{name}")
+                    }
+                } else if trailing_comma {
+                    format!(" {name},")
+                } else {
+                    format!(", {name}")
+                };
+                (at, insert)
+            }
+        };
+        return format!("{}{insert}{}", &text[..at], &text[at..]);
     }
     format!("import {{ {name} }} from {MODULE};\n{text}")
 }

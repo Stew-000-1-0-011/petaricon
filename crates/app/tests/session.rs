@@ -372,3 +372,73 @@ fn tree_actions_move_keep_selection_and_delete() {
     assert!(s.doc().element(&path(&[2])).is_none());
     assert!(s.tree_action(&path(&[]), Delete).is_err());
 }
+
+fn add_widget(header: &str, name: &str) -> (String, String) {
+    let src = format!("{header}{PALETTE_SRC}");
+    i_slint_backend_testing::init_no_event_loop();
+    // Not rebuilt: some headers (missing `other.slint`, empty import) do not compile, and
+    // the text edit does not need geometry.
+    let mut s = Session::new(Document::new(PathBuf::from("/t/main.slint"), src.clone()));
+    select(&mut s, &[0]);
+    s.add_from_palette(name).unwrap();
+    (src, s.doc().text().to_string())
+}
+
+/// The result minus the one inserted element must be the source plus an import change.
+fn without_new_element(text: &str) -> String {
+    let start = text.find("Button {").or_else(|| text.find("LineEdit {")).unwrap();
+    let line_start = text[..start].rfind('\n').unwrap() + 1;
+    let end = start + text[start..].find("}\n").unwrap() + 2;
+    format!("{}{}", &text[..line_start], &text[end..])
+}
+
+#[test]
+fn import_none_header_comment_kept() {
+    let (src, out) = add_widget("// header\n\n", "Button");
+    assert_eq!(
+        without_new_element(&out),
+        format!("import {{ Button }} from \"std-widgets.slint\";\n{src}")
+    );
+}
+
+#[test]
+fn import_multiline_trailing_comma() {
+    let h = "import {\n  Button,\n  Slider,\n} from \"std-widgets.slint\";\n";
+    let (src, out) = add_widget(h, "LineEdit");
+    let want = src.replacen("  Slider,\n}", "  Slider,\n  LineEdit,\n}", 1);
+    assert_eq!(without_new_element(&out), want);
+}
+
+#[test]
+fn import_multiline_without_trailing_comma() {
+    let h = "import {\n\tButton,\n\tSlider\n} from \"std-widgets.slint\";\n";
+    let (src, out) = add_widget(h, "LineEdit");
+    let want = src.replacen("\tSlider\n}", "\tSlider,\n\tLineEdit\n}", 1);
+    assert_eq!(without_new_element(&out), want);
+}
+
+#[test]
+fn import_empty_braces() {
+    let (src, out) = add_widget("import { } from \"std-widgets.slint\";\n", "Button");
+    assert_eq!(
+        without_new_element(&out),
+        src.replacen("{ }", "{ Button }", 1)
+    );
+}
+
+#[test]
+fn import_other_module_only() {
+    let h = "import { X } from \"other.slint\";\n";
+    let (src, out) = add_widget(h, "Button");
+    assert_eq!(
+        without_new_element(&out),
+        format!("import {{ Button }} from \"std-widgets.slint\";\n{src}")
+    );
+}
+
+#[test]
+fn import_alias_counts_as_present() {
+    let h = "import { Button as B } from \"std-widgets.slint\";\n";
+    let (src, out) = add_widget(h, "Button");
+    assert_eq!(without_new_element(&out), src);
+}
