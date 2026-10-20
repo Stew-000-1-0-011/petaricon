@@ -87,8 +87,19 @@ pub struct Glue {
     /// Start and text of the range the Source tab shows, as it is in the document.
     source_view: Option<(usize, String)>,
     /// A property edit waiting for its debounce timer.
-    pending_prop: Option<(String, String)>,
+    pending_prop: Option<PendingProp>,
+    /// The Source tab text has edits that were not applied; refreshes leave it alone until
+    /// the user applies, jumps to the error, or deliberately changes selection/file/component.
+    source_dirty: bool,
     prop_timer: slint::Timer,
+}
+
+/// A property edit with the element and document it was typed for.
+struct PendingProp {
+    doc: (String, String),
+    path: slint_doc::ElementPath,
+    name: String,
+    value: String,
 }
 
 type Shared = Rc<RefCell<Glue>>;
@@ -191,11 +202,13 @@ impl Glue {
         let text = range.as_ref().and_then(|r| self.session.doc().text().get(r.clone()));
         match (range.as_ref(), text) {
             (Some(r), Some(t)) => {
+                self.source_dirty = false;
                 ed.set_source_text(t.into());
                 self.source_view = Some((r.start, t.to_string()));
                 ed.set_source_title(title.into());
             }
             _ => {
+                self.source_dirty = false;
                 ed.set_source_text("".into());
                 self.source_view = None;
                 ed.set_source_title("".into());
@@ -205,6 +218,9 @@ impl Glue {
 
     /// Shows the selected element (else the current component) in the Source tab.
     fn refresh_source(&mut self) {
+        if self.source_dirty {
+            return;
+        }
         let title = match self.session.selection() {
             Some(p) => self
                 .session
@@ -216,6 +232,11 @@ impl Glue {
         };
         let range = self.session.source_range();
         self.show_source(range, &title);
+    }
+
+    /// A deliberate context change (selection, file, component, undo): typed source is dropped.
+    fn discard_source_edits(&mut self) {
+        self.source_dirty = false;
     }
 
     fn refresh_panels(&mut self) {
@@ -268,6 +289,8 @@ impl Glue {
     }
 
     fn open_file(&mut self, project: &str, file: &str) {
+        self.flush_prop();
+        self.discard_source_edits();
         // Keep the current file open (and its error visible) if its edits cannot be saved.
         if self.loaded && !self.save() {
             return;
@@ -321,6 +344,7 @@ impl Glue {
 
     fn tree_selected(&mut self, row: i32) {
         self.flush_prop();
+        self.discard_source_edits();
         self.editor().set_message("".into());
         if let Some(r) = self.session.tree_rows().into_iter().nth(row as usize) {
             self.session.select_path(r.path);
@@ -356,6 +380,7 @@ impl Glue {
 
     fn tapped(&mut self, x: f32, y: f32) {
         self.flush_prop();
+        self.discard_source_edits();
         self.editor().set_message("".into());
         self.session.tap(x / self.zoom, y / self.zoom);
         self.update_overlay();
@@ -380,6 +405,7 @@ impl Glue {
 
     fn history(&mut self, undo: bool) {
         self.flush_prop();
+        self.discard_source_edits();
         self.editor().set_message("".into());
         let changed = if undo { self.session.undo() } else { self.session.redo() };
         if changed {
@@ -387,23 +413,36 @@ impl Glue {
         }
     }
 
+    fn queue_prop(&mut self, name: &str, value: &str) -> bool {
+        let Some(path) = self.session.selection().cloned() else {
+            self.set_error(&crate::session::SessionError::NoSelection.to_string());
+            return false;
+        };
+        self.pending_prop = Some(PendingProp {
+            doc: (self.project.clone(), self.file.clone()),
+            path,
+            name: name.to_string(),
+            value: value.to_string(),
+        });
+        true
+    }
+
     /// Queues a property edit; it is applied 300 ms after the last keystroke.
     fn prop_edited(&mut self, name: &str, value: &str) {
-        self.pending_prop = Some((name.to_string(), value.to_string()));
+        if !self.queue_prop(name, value) {
+            return;
+        }
         let me = self.me.clone();
         self.prop_timer.start(slint::TimerMode::SingleShot, PROP_DEBOUNCE, move || {
-            if let Some(g) = me.upgrade()
-                && let Ok(mut g) = g.try_borrow_mut()
-            {
-                // The edit field keeps its text and focus: only the preview is rebuilt.
-                g.commit_prop(false);
-            }
+            // The edit field keeps its text and focus: only the preview is rebuilt.
+            commit_when_free(me.clone());
         });
     }
 
     fn prop_accepted(&mut self, name: &str, value: &str) {
-        self.pending_prop = Some((name.to_string(), value.to_string()));
-        self.commit_prop(true);
+        if self.queue_prop(name, value) {
+            self.commit_prop(true);
+        }
     }
 
     fn flush_prop(&mut self) {
@@ -412,11 +451,17 @@ impl Glue {
         }
     }
 
+    /// Applies the pending edit unless the selection or the document changed since it was typed.
     fn commit_prop(&mut self, refresh_props: bool) {
         self.prop_timer.stop();
-        let Some((name, value)) = self.pending_prop.take() else { return };
+        let Some(p) = self.pending_prop.take() else { return };
+        if p.doc != (self.project.clone(), self.file.clone())
+            || self.session.selection() != Some(&p.path)
+        {
+            return;
+        }
         self.editor().set_message("".into());
-        match self.session.set_property(&name, &value) {
+        match self.session.set_property(&p.name, &p.value) {
             Ok(()) => self.rebuild_with(refresh_props, true),
             Err(e) => self.set_error(&e.to_string()),
         }
@@ -431,6 +476,7 @@ impl Glue {
         };
         match self.session.replace_source(start, &original, text) {
             Ok(()) => {
+                self.source_dirty = false;
                 self.source_view = Some((start, text.to_string()));
                 // Keep the typed text visible, also when it does not compile.
                 self.rebuild_with(true, false);
@@ -468,9 +514,23 @@ impl Glue {
     }
 
     fn choose_component(&mut self, name: &str) {
+        self.flush_prop();
+        self.discard_source_edits();
         self.session.set_component(name);
         self.editor().set_has_selection(false);
         self.rebuild();
+    }
+}
+
+/// Commits the pending property edit; when the glue is borrowed right now (re-entrant
+/// callback), tries again shortly instead of dropping the edit.
+fn commit_when_free(me: Weak<RefCell<Glue>>) {
+    let Some(g) = me.upgrade() else { return };
+    match g.try_borrow_mut() {
+        Ok(mut g) => g.commit_prop(false),
+        Err(_) => slint::Timer::single_shot(Duration::from_millis(50), move || {
+            commit_when_free(me.clone())
+        }),
     }
 }
 
@@ -500,6 +560,7 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_prop_edited, |g, n, v| g.prop_edited(&n, &v));
     on!(on_prop_accepted, |g, n, v| g.prop_accepted(&n, &v));
     on!(on_source_apply, |g, t| g.source_apply(&t));
+    on!(on_source_edited, |g| g.source_dirty = true);
     on!(on_error_tapped, |g| g.error_tapped());
     on!(on_zoom, |g, m| g.zoom_by(m));
 }
@@ -536,6 +597,7 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
             zoom: 1.0,
             source_view: None,
             pending_prop: None,
+            source_dirty: false,
             prop_timer: slint::Timer::default(),
         })
     });

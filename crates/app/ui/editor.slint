@@ -50,6 +50,7 @@ export component Editor inherits Window {
     callback prop-edited(string, string);
     callback prop-accepted(string, string);
     callback source-apply(string);
+    callback source-edited();
     callback error-tapped();
 
     init => { Palette.color-scheme = ColorScheme.dark; }
@@ -150,6 +151,7 @@ export component Editor inherits Window {
         prop-edited(n, v) => { root.prop-edited(n, v); }
         prop-accepted(n, v) => { root.prop-accepted(n, v); }
         source-apply(t) => { root.source-apply(t); }
+        source-edited() => { root.source-edited(); }
         tree-selected(i) => { root.tree-selected(i); }
         tree-action(a) => { root.tree-action(a); }
         palette-picked(n) => { root.palette-picked(n); }

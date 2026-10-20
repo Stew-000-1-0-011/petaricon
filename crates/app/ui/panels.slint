@@ -47,6 +47,7 @@ export component BottomPanel inherits Rectangle {
     callback prop-edited(string, string);
     callback prop-accepted(string, string);
     callback source-apply(string);
+    callback source-edited();
     callback tree-selected(int);
     // 0 up, 1 down, 2 out, 3 in, 4 delete, 5 new container
     callback tree-action(int);
@@ -177,6 +178,7 @@ export component BottomPanel inherits Rectangle {
                     vertical-stretch: 1;
                     font-size: 13px;
                     text <=> root.source-text;
+                    edited(_) => { root.source-edited(); }
                 }
                 ToolButton {
                     text: "Apply";

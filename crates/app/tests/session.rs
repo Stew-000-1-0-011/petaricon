@@ -548,3 +548,20 @@ fn component_range_at_offset() {
     assert!(src[r].starts_with("export component B"));
     assert_eq!(s.component_range_at(None), 0..src.len());
 }
+
+#[test]
+fn text_keeps_surrounding_spaces_and_same_value_is_a_noop() {
+    let mut s = session();
+    select(&mut s, &[1, 0]);
+    s.set_property("text", "Hi ").unwrap();
+    assert!(s.doc().text().contains("text: \"Hi \";"));
+    s.mark_saved();
+    s.set_property("text", "Hi ").unwrap();
+    s.set_property("text", "\"Hi \"").unwrap();
+    assert!(!s.doc().is_dirty());
+    select(&mut s, &[0]);
+    s.set_property("x", "10").unwrap();
+    assert!(!s.doc().is_dirty());
+    s.set_property("background", "").unwrap();
+    assert!(!s.doc().is_dirty());
+}

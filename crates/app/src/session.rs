@@ -454,8 +454,23 @@ impl Session {
     /// Sets (or, for an empty value, removes) a property of the selection.
     pub fn set_property(&mut self, name: &str, value: &str) -> Result<(), SessionError> {
         let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
-        let value = value.trim();
-        let expr = (!value.is_empty()).then(|| normalise(prop_kind(name), value));
+        // Only the emptiness check and non-text values are trimmed: `"Hi "` keeps its space.
+        let kind = prop_kind(name);
+        let value = if kind == PropKind::Text && !value.trim().is_empty() {
+            value
+        } else {
+            value.trim()
+        };
+        let expr = (!value.is_empty()).then(|| normalise(kind, value));
+        let current = self
+            .properties()
+            .into_iter()
+            .find(|r| r.name == name)
+            .map(|r| r.expr)
+            .unwrap_or_default();
+        if current == expr.clone().unwrap_or_default() {
+            return Ok(());
+        }
         self.apply(Op::SetBindings { path, bindings: vec![(name.to_string(), expr)] })
     }
 
