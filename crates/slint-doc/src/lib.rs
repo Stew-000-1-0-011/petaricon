@@ -5,6 +5,9 @@ mod syntax;
 use i_slint_compiler::parser::{SyntaxKind, SyntaxNode};
 use std::path::{Path, PathBuf};
 
+/// Address of an element. Element children are the `SubElement` / `RepeatedElement` /
+/// `ConditionalElement` / `MatchElement` nodes of an element in source order; for a
+/// `match`, only the first case's element is addressable.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ElementPath {
     pub component: String,
@@ -89,15 +92,25 @@ fn binding_infos(element: &SyntaxNode) -> Vec<Binding> {
         .filter(|b| b.kind() == SyntaxKind::Binding)
         .filter_map(|b| {
             let name = b.child_text(SyntaxKind::Identifier)?;
-            let expr = b.child_node(SyntaxKind::BindingExpression)?.text().to_string();
+            let expr = b
+                .child_node(SyntaxKind::BindingExpression)?
+                .text()
+                .to_string();
             let expr = expr.trim();
             let expr = expr.strip_suffix(';').unwrap_or(expr).trim_end();
-            Some(Binding { name: name.to_string(), expr: expr.to_string() })
+            Some(Binding {
+                name: name.to_string(),
+                expr: expr.to_string(),
+            })
         })
         .collect()
 }
 
-fn element_info(path: ElementPath, child: Option<&SyntaxNode>, element: &SyntaxNode) -> ElementInfo {
+fn element_info(
+    path: ElementPath,
+    child: Option<&SyntaxNode>,
+    element: &SyntaxNode,
+) -> ElementInfo {
     let type_name = type_name(element);
     let kind = match child.map(|c| c.kind()) {
         Some(SyntaxKind::RepeatedElement) => ElementKind::Repeated,
@@ -129,7 +142,14 @@ fn build_tree(path: ElementPath, child: Option<&SyntaxNode>, element: &SyntaxNod
             let inner = syntax::inner_element(c)?;
             let mut indices = path.indices.clone();
             indices.push(i);
-            Some(build_tree(ElementPath { component: path.component.clone(), indices }, Some(c), &inner))
+            Some(build_tree(
+                ElementPath {
+                    component: path.component.clone(),
+                    indices,
+                },
+                Some(c),
+                &inner,
+            ))
         })
         .collect();
     TreeNode { info, children }
@@ -161,7 +181,9 @@ impl Document {
                 ComponentInfo {
                     name: syntax::component_name(c),
                     base: element.as_ref().map(type_name).unwrap_or_default(),
-                    exported: c.parent().is_some_and(|p| p.kind() == SyntaxKind::ExportsList),
+                    exported: c
+                        .parent()
+                        .is_some_and(|p| p.kind() == SyntaxKind::ExportsList),
                     declarations: element
                         .iter()
                         .flat_map(|e| e.children())
@@ -181,18 +203,19 @@ impl Document {
     pub fn tree(&self, component: &str) -> Option<TreeNode> {
         let root = self.parse();
         let element = syntax::component_element(&syntax::component_node(&root, component)?)?;
-        Some(build_tree(ElementPath { component: component.to_string(), indices: vec![] }, None, &element))
+        Some(build_tree(
+            ElementPath {
+                component: component.to_string(),
+                indices: vec![],
+            },
+            None,
+            &element,
+        ))
     }
 
     pub fn element(&self, path: &ElementPath) -> Option<ElementInfo> {
         let root = self.parse();
-        let element = syntax::resolve(&root, path)?;
-        let child = element.parent().filter(|p| p.kind() != SyntaxKind::Component);
-        // For Repeated/Conditional the Element sits in a SubElement inside the wrapper.
-        let child = child.map(|p| match p.parent() {
-            Some(w) if matches!(w.kind(), SyntaxKind::RepeatedElement | SyntaxKind::ConditionalElement) => w,
-            _ => p,
-        });
+        let (child, element) = syntax::resolve(&root, path)?;
         Some(element_info(path.clone(), child.as_ref(), &element))
     }
 
@@ -200,9 +223,14 @@ impl Document {
         let root = self.parse();
         for component in syntax::components(&root) {
             let name = syntax::component_name(&component);
-            let element = syntax::component_element(&component)?;
+            let Some(element) = syntax::component_element(&component) else {
+                continue;
+            };
             if let Some(indices) = find(&element, offset) {
-                return Some(ElementPath { component: name, indices });
+                return Some(ElementPath {
+                    component: name,
+                    indices,
+                });
             }
         }
         None

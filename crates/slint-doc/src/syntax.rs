@@ -18,11 +18,15 @@ pub(crate) fn component_name(component: &SyntaxNode) -> String {
 }
 
 pub(crate) fn components(root: &SyntaxNode) -> Vec<SyntaxNode> {
-    root.descendants().filter(|n| n.kind() == SyntaxKind::Component).collect()
+    root.descendants()
+        .filter(|n| n.kind() == SyntaxKind::Component)
+        .collect()
 }
 
 pub(crate) fn component_node(root: &SyntaxNode, name: &str) -> Option<SyntaxNode> {
-    components(root).into_iter().find(|c| component_name(c) == name)
+    components(root)
+        .into_iter()
+        .find(|c| component_name(c) == name)
 }
 
 pub(crate) fn component_element(component: &SyntaxNode) -> Option<SyntaxNode> {
@@ -49,19 +53,27 @@ pub(crate) fn element_children(element: &SyntaxNode) -> Vec<SyntaxNode> {
 pub(crate) fn inner_element(child: &SyntaxNode) -> Option<SyntaxNode> {
     match child.kind() {
         SyntaxKind::SubElement => child.child_node(SyntaxKind::Element),
-        SyntaxKind::RepeatedElement | SyntaxKind::ConditionalElement => {
-            child.child_node(SyntaxKind::SubElement)?.child_node(SyntaxKind::Element)
-        }
-        _ => child.descendants().find(|n| n.kind() == SyntaxKind::Element),
+        SyntaxKind::RepeatedElement | SyntaxKind::ConditionalElement => child
+            .child_node(SyntaxKind::SubElement)?
+            .child_node(SyntaxKind::Element),
+        _ => child
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::Element),
     }
 }
 
-/// Resolves a path to its `Element` node.
-pub(crate) fn resolve(root: &SyntaxNode, path: &ElementPath) -> Option<SyntaxNode> {
+/// Resolves a path to its `Element` node and the child node wrapping it
+/// (`None` for the component root).
+pub(crate) fn resolve(
+    root: &SyntaxNode,
+    path: &ElementPath,
+) -> Option<(Option<SyntaxNode>, SyntaxNode)> {
     let mut element = component_element(&component_node(root, &path.component)?)?;
+    let mut wrapper = None;
     for &i in &path.indices {
         let child = element_children(&element).into_iter().nth(i)?;
         element = inner_element(&child)?;
+        wrapper = Some(child);
     }
-    Some(element)
+    Some((wrapper, element))
 }
