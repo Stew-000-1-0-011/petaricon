@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 fn main() -> Result<(), slint::PlatformError> {
+    app::font::install(&std::env::temp_dir().join("petaricon-fonts"));
     let root = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)

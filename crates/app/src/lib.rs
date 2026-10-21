@@ -1,4 +1,5 @@
 pub mod crashlog;
+pub mod font;
 pub mod glue;
 pub mod guides;
 pub mod layout_bridge;
@@ -25,6 +26,11 @@ fn android_main(app: slint::android::AndroidApp) {
     use slint::android::android_activity::{MainEvent, PollEvent};
 
     let base = app.external_data_path().expect("no external data path");
+    // Before the Slint backend starts, so its font collection sees the variable.
+    match app.internal_data_path() {
+        Some(dir) => font::install(&dir.join("fonts")),
+        None => font::install(&base.join("fonts")),
+    }
     slint::android::init_with_event_listener(app, |event| {
         if let PollEvent::Main(MainEvent::Pause) = event {
             glue::save_now();
