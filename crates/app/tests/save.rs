@@ -66,6 +66,9 @@ impl ProjectStore for Flaky {
     fn projects(&self) -> io::Result<Vec<String>> { self.inner.projects() }
     fn create_project(&self, n: &str) -> io::Result<()> { self.inner.create_project(n) }
     fn files(&self, p: &str) -> io::Result<Vec<String>> { self.inner.files(p) }
+    fn create_file(&self, p: &str, n: &str) -> io::Result<String> { self.inner.create_file(p, n) }
+    fn rename_file(&self, p: &str, o: &str, n: &str) -> io::Result<String> { self.inner.rename_file(p, o, n) }
+    fn rename_project(&self, o: &str, n: &str) -> io::Result<()> { self.inner.rename_project(o, n) }
     fn read(&self, p: &str, f: &str) -> io::Result<String> { self.inner.read(p, f) }
     fn write(&self, p: &str, f: &str, t: &str) -> io::Result<()> {
         if self.fail_writes.get() {

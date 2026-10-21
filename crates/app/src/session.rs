@@ -279,6 +279,11 @@ impl Session {
         self.doc.mark_saved();
     }
 
+    /// The document now lives at `path` (rename / save as); call `rebuild()` afterwards.
+    pub fn set_path(&mut self, path: std::path::PathBuf) {
+        self.doc.set_path(path);
+    }
+
     /// Called whenever a factory from `rebuild()` has created its instance, i.e. when the
     /// geometry queries start answering for the new build.
     pub fn set_on_instance(&mut self, f: impl Fn() + 'static) {

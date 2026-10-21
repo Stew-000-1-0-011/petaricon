@@ -738,6 +738,182 @@ impl Glue {
         }
     }
 
+    fn dialog_error(&self, text: &str) {
+        self.editor().set_dialog_error(text.into());
+    }
+
+    /// Flushes the pending property edit and saves unsaved changes. On failure the error is
+    /// shown in the dialog (and the error band) and false is returned.
+    fn save_before_op(&mut self) -> bool {
+        self.flush_prop();
+        if self.loaded && !self.save() {
+            let e = self.editor().get_error_text();
+            self.dialog_error(&e);
+            return false;
+        }
+        true
+    }
+
+    fn op_done(&mut self, menu_project: &str) {
+        let ed = self.editor();
+        ed.set_dialog_error("".into());
+        ed.set_file_op(0);
+        ed.set_menu_project(menu_project.into());
+    }
+
+    fn document_moved(&mut self, project: &str, file: &str) {
+        self.project = project.to_string();
+        self.file = file.to_string();
+        self.session.set_path(PathBuf::from(format!("{project}/{file}")));
+        let _ = self.store.set_last_open(project, file);
+    }
+
+    /// The File menu dialog was confirmed. `mode`: 1 new file, 2 rename the open file,
+    /// 3 rename `project`, 4 save as `name` in `project`. Errors stay in the dialog and
+    /// change nothing.
+    fn file_op_run(&mut self, mode: i32, name: &str, project: &str) {
+        self.editor().set_message("".into());
+        self.dialog_error("");
+        let project = if mode == 2 { self.project.clone() } else { project.to_string() };
+        let project = project.as_str();
+        if (1..=4).contains(&mode) && !self.name_free(mode, project, name) {
+            return;
+        }
+        match mode {
+            1 => self.new_file(project, name),
+            2 => self.rename_open_file(name),
+            3 => self.rename_project(project, name),
+            4 => self.save_as(project, name),
+            _ => {}
+        }
+    }
+
+    /// Refuses a bad or taken name before anything (a save included) happens.
+    fn name_free(&self, mode: i32, project: &str, name: &str) -> bool {
+        let err = storage::check_name(name).err().or_else(|| {
+            let taken = if mode == 3 {
+                self.store.projects().unwrap_or_default().iter().any(|p| p == name)
+            } else {
+                let file = if name.ends_with(".slint") {
+                    name.to_string()
+                } else {
+                    format!("{name}.slint")
+                };
+                self.store.files(project).unwrap_or_default().contains(&file)
+                    && !(mode == 2 && file == self.file)
+            };
+            taken.then(|| std::io::ErrorKind::AlreadyExists.into())
+        });
+        match err {
+            Some(e) => {
+                self.dialog_error(&op_error(&e, name));
+                false
+            }
+            None => true,
+        }
+    }
+
+    fn new_file(&mut self, project: &str, name: &str) {
+        if !self.save_before_op() {
+            return;
+        }
+        match self.store.create_file(project, name) {
+            Ok(file) => {
+                self.open_file(project, &file);
+                if (self.project.as_str(), self.file.as_str()) == (project, file.as_str()) {
+                    self.op_done(project);
+                } else {
+                    // Opening failed; the error band says why.
+                    self.op_done(&self.project.clone());
+                }
+            }
+            Err(e) => self.dialog_error(&op_error(&e, name)),
+        }
+    }
+
+    fn rename_open_file(&mut self, name: &str) {
+        if !self.save_before_op() {
+            return;
+        }
+        let (project, old) = (self.project.clone(), self.file.clone());
+        match self.store.rename_file(&project, &old, name) {
+            Ok(new) => {
+                if let Some(r) = &mut self.recovered
+                    && r.0 == project
+                    && r.1 == old
+                {
+                    r.1 = new.clone();
+                }
+                self.document_moved(&project, &new);
+                self.refresh_lists();
+                self.rebuild();
+                self.op_done(&project);
+                self.editor().set_message(format!("Renamed to {new}").into());
+            }
+            Err(e) => self.dialog_error(&op_error(&e, name)),
+        }
+    }
+
+    fn rename_project(&mut self, project: &str, name: &str) {
+        let is_open = project == self.project;
+        if is_open && !self.save_before_op() {
+            return;
+        }
+        match self.store.rename_project(project, name) {
+            Ok(()) => {
+                if is_open {
+                    if let Some(r) = &mut self.recovered
+                        && r.0 == project
+                    {
+                        r.0 = name.to_string();
+                    }
+                    let file = self.file.clone();
+                    self.document_moved(name, &file);
+                    self.refresh_lists();
+                    self.rebuild();
+                } else {
+                    self.refresh_lists();
+                    self.select_project(name);
+                }
+                self.op_done(name);
+                self.editor().set_message(format!("Renamed to {name}").into());
+            }
+            Err(e) => self.dialog_error(&op_error(&e, name)),
+        }
+    }
+
+    /// Writes the editor text to a new file and moves the session there. The original file
+    /// is not written, even when the document had unsaved changes.
+    fn save_as(&mut self, project: &str, name: &str) {
+        self.flush_prop();
+        if !self.loaded {
+            self.dialog_error(&format!("{} was not loaded; nothing to save", self.file));
+            return;
+        }
+        let text = self.session.doc().text().to_string();
+        let file = match self.store.create_file(project, name) {
+            Ok(f) => f,
+            Err(e) => return self.dialog_error(&op_error(&e, name)),
+        };
+        if let Err(e) = self.store.write(project, &file, &text) {
+            self.dialog_error(&format!("Save failed: {e}"));
+            return;
+        }
+        // The edits now live in the new file; a draft of exactly this text is redundant.
+        if let Ok(Some(r)) = self.store.take_recovery(&self.project, &self.file)
+            && r == text
+        {
+            let _ = self.store.clear_recovery(&self.project, &self.file);
+        }
+        self.document_moved(project, &file);
+        self.session.mark_saved();
+        self.last_recovery = None;
+        self.refresh_lists();
+        self.rebuild();
+        self.op_done(project);
+        self.editor().set_message(format!("Saved as {file}").into());
+    }
+
     fn select_project(&mut self, name: &str) {
         self.editor()
             .set_files(to_model(self.store.files(name).unwrap_or_default()));
@@ -862,6 +1038,16 @@ impl Glue {
     }
 }
 
+fn op_error(e: &std::io::Error, name: &str) -> String {
+    match e.kind() {
+        std::io::ErrorKind::AlreadyExists => format!("{name} already exists"),
+        std::io::ErrorKind::InvalidInput => format!(
+            "{name:?} is not a valid name (no /, \\ or .. and no leading dot)"
+        ),
+        _ => format!("{name}: {e}"),
+    }
+}
+
 /// Commits the pending property edit; when the glue is borrowed right now (re-entrant
 /// callback), tries again shortly instead of dropping the edit.
 fn commit_when_free(me: Weak<RefCell<Glue>>) {
@@ -910,6 +1096,7 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_extract_run, |g, n| g.extract_run(&n));
     on!(on_declaration_add, |g, k, t, n| g.declaration_add(k, &t, &n));
     on!(on_recovery_answered, |g, r| g.recovery_answered(r));
+    on!(on_file_op_run, |g, m, n, p| g.file_op_run(m, &n, &p));
     on!(on_guide_edited, |g, p, v| g.guide_edited(&p, &v));
 }
 

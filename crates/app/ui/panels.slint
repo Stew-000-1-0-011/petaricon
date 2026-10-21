@@ -218,6 +218,7 @@ export component MenuList inherits Rectangle {
 
 export component NewProject inherits HorizontalLayout {
     callback create(string);
+    callback rename();
     spacing: 6px;
     height: 44px;
     name := LineEdit { placeholder-text: "new project"; }
@@ -231,6 +232,19 @@ export component NewProject inherits HorizontalLayout {
             }
         }
     }
+    ToolButton { text: "Rename"; min-width: 64px; clicked => { root.rename(); } }
+}
+
+// Buttons acting on the files of the selected project and on the open file.
+export component FileActions inherits HorizontalLayout {
+    callback new-file();
+    callback rename();
+    callback save-as();
+    spacing: 6px;
+    height: 44px;
+    ToolButton { text: "New file"; horizontal-stretch: 1; clicked => { root.new-file(); } }
+    ToolButton { text: "Rename"; horizontal-stretch: 1; clicked => { root.rename(); } }
+    ToolButton { text: "Save as…"; horizontal-stretch: 1; clicked => { root.save-as(); } }
 }
 
 // A selectable chip, at least 44px tall.
@@ -379,6 +393,74 @@ export component RecoveryDialog inherits ModalCard {
             height: 44px;
             ToolButton { text: "いいえ"; clicked => { root.answered(false); } }
             ToolButton { text: "はい"; clicked => { root.answered(true); } }
+        }
+    }
+}
+
+// One dialog for the file operations: 1 new file, 2 rename file, 3 rename project, 4 save as.
+export component FileOpDialog inherits ModalCard {
+    in property <int> mode;
+    in property <string> error;
+    in property <[string]> projects;
+    in property <string> initial;
+    in property <string> initial-project;
+    callback edited();
+    callback run(string /* name */, string /* project */);
+    callback close();
+    property <string> target: root.initial-project;
+
+    VerticalLayout {
+        spacing: 8px;
+        Text {
+            text: root.mode == 1 ? "New file" : root.mode == 2 ? "Rename file"
+                : root.mode == 3 ? "Rename project" : "Save as";
+            color: white;
+            font-size: 16px;
+        }
+        if root.mode == 1 || root.mode == 4: Text {
+            text: "Project: " + root.target;
+            color: #9aa3ad;
+            font-size: 12px;
+        }
+        name := LineEdit {
+            height: 44px;
+            text: root.initial;
+            placeholder-text: root.mode == 3 ? "project name" : "file name";
+            edited(_) => { root.edited(); }
+            accepted(t) => { if t != "" { root.run(t, root.target); } }
+            init => { self.focus(); }
+        }
+        if root.mode == 4: ListView {
+            height: 132px;
+            for p in root.projects: Rectangle {
+                height: 44px;
+                background: p == root.target ? #3a4a5c : transparent;
+                Text {
+                    x: 8px;
+                    text: p;
+                    color: white;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                }
+                TouchArea { clicked => { root.target = p; root.edited(); } }
+            }
+        }
+        Text {
+            text: root.error;
+            color: #ff8a80;
+            font-size: 12px;
+            wrap: word-wrap;
+            visible: root.error != "";
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            height: 44px;
+            ToolButton { text: "Cancel"; clicked => { root.close(); } }
+            ToolButton {
+                text: root.mode == 1 ? "Create" : root.mode == 4 ? "Save" : "OK";
+                enabled: name.text != "";
+                clicked => { root.run(name.text, root.target); }
+            }
         }
     }
 }

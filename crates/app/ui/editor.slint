@@ -1,6 +1,6 @@
 import { Palette } from "std-widgets.slint";
 import { Canvas, GuideBand } from "canvas.slint";
-import { BottomPanel, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, ExtractDialog, RecoveryDialog } from "panels.slint";
+import { BottomPanel, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, ExtractDialog, RecoveryDialog, FileActions, FileOpDialog } from "panels.slint";
 export { TreeRowItem, PropItem, GuideBand }
 
 export component Editor inherits Window {
@@ -53,6 +53,10 @@ export component Editor inherits Window {
     in-out property <int> extract-step;
     in-out property <string> dialog-error;
     in-out property <bool> recovery-open;
+    // File operation dialog: 0 closed, 1 new file, 2 rename file, 3 rename project, 4 save as.
+    in-out property <int> file-op;
+    // The project whose files the File menu lists (the glue moves it after renames).
+    in-out property <string> menu-project: root.current-project;
 
     callback tapped(length, length);
     callback drag-finished(length, length);
@@ -81,11 +85,11 @@ export component Editor inherits Window {
     callback extract-run(string);
     callback declaration-add(int /* kind */, string /* type */, string /* name */);
     callback recovery-answered(bool);
+    callback file-op-run(int /* mode */, string /* name */, string /* project */);
 
     init => { Palette.color-scheme = ColorScheme.dark; }
 
     property <bool> menu-open;
-    property <string> menu-project: root.current-project;
     property <bool> wide: root.width > root.height;
     property <length> inset-top: root.safe-area-insets.top;
     property <length> inset-bottom: root.safe-area-insets.bottom;
@@ -247,12 +251,18 @@ export component Editor inherits Window {
                 }
                 NewProject {
                     create(n) => { root.create-project(n); root.menu-project = n; root.select-project(n); }
+                    rename => { root.menu-open = false; root.dialog-error = ""; root.file-op = 3; }
                 }
                 MenuList {
                     title: "Files";
                     items: root.files;
                     current: root.menu-project == root.current-project ? root.current-file : "";
                     picked(f) => { root.menu-open = false; root.open(root.menu-project, f); }
+                }
+                FileActions {
+                    new-file => { root.menu-open = false; root.dialog-error = ""; root.file-op = 1; }
+                    rename => { root.menu-open = false; root.dialog-error = ""; root.file-op = 2; }
+                    save-as => { root.menu-open = false; root.dialog-error = ""; root.file-op = 4; }
                 }
                 MenuList {
                     title: "Components";
@@ -272,6 +282,18 @@ export component Editor inherits Window {
         run(n) => { root.extract-run(n); }
         add(k, t, n) => { root.declaration-add(k, t, n); }
         close => { root.extract-step = 0; root.dialog-error = ""; }
+    }
+
+    if root.file-op != 0: FileOpDialog {
+        mode: root.file-op;
+        error: root.dialog-error;
+        projects: root.projects;
+        initial: root.file-op == 2 || root.file-op == 4 ? root.current-file
+            : root.file-op == 3 ? root.menu-project : "";
+        initial-project: root.file-op == 4 ? root.current-project : root.menu-project;
+        edited => { root.dialog-error = ""; }
+        run(n, p) => { root.file-op-run(root.file-op, n, p); }
+        close => { root.file-op = 0; root.dialog-error = ""; }
     }
 
     if root.recovery-open: RecoveryDialog {

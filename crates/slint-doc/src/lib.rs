@@ -217,6 +217,11 @@ impl Document {
         &self.path
     }
 
+    /// Points the document at a new path (rename / save as); text and history are kept.
+    pub fn set_path(&mut self, path: PathBuf) {
+        self.path = path;
+    }
+
     fn parse(&self) -> SyntaxNode {
         syntax::parse(&self.text, &self.path)
     }

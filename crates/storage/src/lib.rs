@@ -17,6 +17,14 @@ pub trait ProjectStore {
     fn projects(&self) -> io::Result<Vec<String>>;
     fn create_project(&self, name: &str) -> io::Result<()>;
     fn files(&self, project: &str) -> io::Result<Vec<String>>;
+    /// Creates `{name}.slint` (the extension is appended when missing) from the project
+    /// template and returns the final file name. `AlreadyExists` when it is there.
+    fn create_file(&self, project: &str, name: &str) -> io::Result<String>;
+    /// Renames a file together with its `.bak` and recovery copy; never overwrites. Returns
+    /// the final name (`.slint` appended when missing).
+    fn rename_file(&self, project: &str, old: &str, new: &str) -> io::Result<String>;
+    /// Renames a project directory; never overwrites.
+    fn rename_project(&self, old: &str, new: &str) -> io::Result<()>;
     fn read(&self, project: &str, file: &str) -> io::Result<String>;
     fn write(&self, project: &str, file: &str, text: &str) -> io::Result<()>;
     fn write_recovery(&self, project: &str, file: &str, text: &str) -> io::Result<()>;
@@ -36,7 +44,8 @@ pub struct LocalStore {
     root: PathBuf,
 }
 
-fn check_name(name: &str) -> io::Result<()> {
+/// The rule every project and file name must pass.
+pub fn check_name(name: &str) -> io::Result<()> {
     if name.is_empty()
         || name.contains(['/', '\\'])
         || name.contains("..")
@@ -73,6 +82,17 @@ impl LocalStore {
     }
 }
 
+fn with_extension_slint(name: &str) -> String {
+    if name.ends_with(".slint") { name.to_string() } else { format!("{name}.slint") }
+}
+
+fn rename_if_exists(from: &Path, to: &Path) -> io::Result<()> {
+    match fs::rename(from, to) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
+}
+
 fn remove_if_exists(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -102,6 +122,72 @@ impl ProjectStore for LocalStore {
         let dir = self.project_dir(name)?;
         fs::create_dir(&dir)?; // AlreadyExists if present
         fs::write(dir.join("main.slint"), MAIN_TEMPLATE)
+    }
+
+    fn create_file(&self, project: &str, name: &str) -> io::Result<String> {
+        check_name(name)?;
+        let name = with_extension_slint(name);
+        let path = self.file_path(project, &name)?;
+        let mut f = fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+        io::Write::write_all(&mut f, MAIN_TEMPLATE.as_bytes())?;
+        Ok(name)
+    }
+
+    fn rename_file(&self, project: &str, old: &str, new: &str) -> io::Result<String> {
+        check_name(old)?;
+        check_name(new)?;
+        let new = with_extension_slint(new);
+        let from = self.file_path(project, old)?;
+        let to = self.file_path(project, &new)?;
+        if old == new {
+            return if from.exists() {
+                Ok(new)
+            } else {
+                Err(io::ErrorKind::NotFound.into())
+            };
+        }
+        if !from.exists() {
+            return Err(io::ErrorKind::NotFound.into());
+        }
+        if to.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{new} already exists"),
+            ));
+        }
+        let from_rec = self.recovery_path(project, old)?;
+        let to_rec = self.recovery_path(project, &new)?;
+        fs::rename(&from, &to)?;
+        rename_if_exists(
+            &from.with_file_name(format!("{old}.bak")),
+            &to.with_file_name(format!("{new}.bak")),
+        )?;
+        rename_if_exists(&from_rec, &to_rec)?;
+        if self.last_open()? == Some((project.to_string(), old.to_string())) {
+            self.set_last_open(project, &new)?;
+        }
+        Ok(new)
+    }
+
+    fn rename_project(&self, old: &str, new: &str) -> io::Result<()> {
+        let from = self.project_dir(old)?;
+        let to = self.project_dir(new)?;
+        if !from.is_dir() {
+            return Err(io::ErrorKind::NotFound.into());
+        }
+        if to.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{new} already exists"),
+            ));
+        }
+        fs::rename(&from, &to)?;
+        if let Some((p, f)) = self.last_open()?
+            && p == old
+        {
+            self.set_last_open(new, &f)?;
+        }
+        Ok(())
     }
 
     fn files(&self, project: &str) -> io::Result<Vec<String>> {
@@ -301,6 +387,133 @@ mod tests {
             assert_eq!(k(s.clear_recovery("p", n)), io::ErrorKind::InvalidInput);
         }
         assert!(!d.path().join("x").exists());
+    }
+
+    #[test]
+    fn create_file_uses_template_and_appends_extension() {
+        let (_d, s) = store();
+        s.create_project("p").unwrap();
+        assert_eq!(s.create_file("p", "card").unwrap(), "card.slint");
+        assert_eq!(s.create_file("p", "x.slint").unwrap(), "x.slint");
+        assert_eq!(s.read("p", "card.slint").unwrap(), s.read("p", "main.slint").unwrap());
+        assert_eq!(s.files("p").unwrap(), vec!["card.slint", "main.slint", "x.slint"]);
+    }
+
+    #[test]
+    fn create_file_refuses_existing_and_invalid_names() {
+        let (_d, s) = store();
+        s.create_project("p").unwrap();
+        s.write("p", "card.slint", "mine").unwrap();
+        assert_eq!(s.create_file("p", "card").unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(s.create_file("p", "main.slint").unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(s.read("p", "card.slint").unwrap(), "mine");
+        for n in ["", "..", "a/b", "a\\b", ".hidden", "x..y", "a\0b"] {
+            assert_eq!(s.create_file("p", n).unwrap_err().kind(), io::ErrorKind::InvalidInput, "{n:?}");
+        }
+        assert_eq!(s.files("p").unwrap(), vec!["card.slint", "main.slint"]);
+    }
+
+    #[test]
+    fn rename_file_moves_file_bak_and_recovery() {
+        let (d, s) = store();
+        s.create_project("p").unwrap();
+        s.write("p", "a.slint", "one").unwrap();
+        s.write("p", "a.slint", "two").unwrap(); // a.slint.bak = one
+        s.write_recovery("p", "a.slint", "draft").unwrap();
+        assert_eq!(s.rename_file("p", "a.slint", "b").unwrap(), "b.slint");
+        assert_eq!(s.read("p", "b.slint").unwrap(), "two");
+        let dir = d.path().join("projects/p");
+        assert_eq!(std::fs::read_to_string(dir.join("b.slint.bak")).unwrap(), "one");
+        assert_eq!(s.take_recovery("p", "b.slint").unwrap().as_deref(), Some("draft"));
+        assert!(!dir.join("a.slint").exists());
+        assert!(!dir.join("a.slint.bak").exists());
+        assert_eq!(s.take_recovery("p", "a.slint").unwrap(), None);
+    }
+
+    #[test]
+    fn rename_file_without_bak_or_recovery() {
+        let (_d, s) = store();
+        s.create_project("p").unwrap();
+        assert_eq!(s.rename_file("p", "main.slint", "m2.slint").unwrap(), "m2.slint");
+        assert_eq!(s.files("p").unwrap(), vec!["m2.slint"]);
+    }
+
+    #[test]
+    fn rename_file_refuses_existing_target_without_changes() {
+        let (d, s) = store();
+        s.create_project("p").unwrap();
+        s.write("p", "a.slint", "A").unwrap();
+        s.write("p", "a.slint", "A2").unwrap();
+        s.write("p", "b.slint", "B").unwrap();
+        s.write_recovery("p", "a.slint", "draft").unwrap();
+        assert_eq!(s.rename_file("p", "a.slint", "b").unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(s.read("p", "a.slint").unwrap(), "A2");
+        assert_eq!(s.read("p", "b.slint").unwrap(), "B");
+        assert_eq!(s.take_recovery("p", "a.slint").unwrap().as_deref(), Some("draft"));
+        assert_eq!(std::fs::read_to_string(d.path().join("projects/p/a.slint.bak")).unwrap(), "A");
+    }
+
+    #[test]
+    fn rename_file_refuses_invalid_names_and_missing_source() {
+        let (_d, s) = store();
+        s.create_project("p").unwrap();
+        for n in ["", "..", "a/b", ".hidden", "x..y"] {
+            assert_eq!(s.rename_file("p", "main.slint", n).unwrap_err().kind(), io::ErrorKind::InvalidInput, "{n:?}");
+            assert_eq!(s.rename_file("p", n, "z").unwrap_err().kind(), io::ErrorKind::InvalidInput, "{n:?}");
+        }
+        assert_eq!(s.rename_file("p", "nope.slint", "z").unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(s.files("p").unwrap(), vec!["main.slint"]);
+    }
+
+    #[test]
+    fn rename_file_follows_last_open_only_for_that_file() {
+        let (_d, s) = store();
+        s.create_project("p").unwrap();
+        s.write("p", "a.slint", "").unwrap();
+        s.set_last_open("p", "a.slint").unwrap();
+        s.rename_file("p", "a.slint", "b").unwrap();
+        assert_eq!(s.last_open().unwrap(), Some(("p".into(), "b.slint".into())));
+        s.set_last_open("p", "main.slint").unwrap();
+        s.rename_file("p", "b.slint", "c").unwrap();
+        assert_eq!(s.last_open().unwrap(), Some(("p".into(), "main.slint".into())));
+    }
+
+    #[test]
+    fn rename_project_moves_everything_and_follows_last_open() {
+        let (_d, s) = store();
+        s.create_project("p").unwrap();
+        s.write_recovery("p", "main.slint", "draft").unwrap();
+        s.set_last_open("p", "main.slint").unwrap();
+        s.rename_project("p", "q").unwrap();
+        assert_eq!(s.projects().unwrap(), vec!["q"]);
+        assert_eq!(s.take_recovery("q", "main.slint").unwrap().as_deref(), Some("draft"));
+        assert_eq!(s.last_open().unwrap(), Some(("q".into(), "main.slint".into())));
+    }
+
+    #[test]
+    fn rename_project_leaves_other_last_open_alone() {
+        let (_d, s) = store();
+        s.create_project("p").unwrap();
+        s.create_project("o").unwrap();
+        s.set_last_open("o", "main.slint").unwrap();
+        s.rename_project("p", "q").unwrap();
+        assert_eq!(s.last_open().unwrap(), Some(("o".into(), "main.slint".into())));
+    }
+
+    #[test]
+    fn rename_project_refuses_existing_target_and_invalid_names() {
+        let (_d, s) = store();
+        s.create_project("p").unwrap();
+        s.create_project("q").unwrap();
+        s.write("q", "main.slint", "mine").unwrap();
+        assert_eq!(s.rename_project("p", "q").unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(s.read("q", "main.slint").unwrap(), "mine");
+        assert_eq!(s.projects().unwrap(), vec!["p", "q"]);
+        for n in ["", "..", "a/b", ".hidden", "x..y"] {
+            assert_eq!(s.rename_project("p", n).unwrap_err().kind(), io::ErrorKind::InvalidInput, "{n:?}");
+            assert_eq!(s.rename_project(n, "z").unwrap_err().kind(), io::ErrorKind::InvalidInput, "{n:?}");
+        }
+        assert_eq!(s.projects().unwrap(), vec!["p", "q"]);
     }
 
     #[test]
