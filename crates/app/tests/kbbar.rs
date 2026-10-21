@@ -1,7 +1,7 @@
 //! The input bar above the on-screen keyboard (driven with PETARICON_FAKE_KEYBOARD's property).
 
 use slint::platform::{PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, Model};
+use slint::{ComponentHandle, LogicalPosition};
 use storage::{LocalStore, ProjectStore};
 
 const SRC: &str = "export component Main inherits Rectangle {\n    width: 300px;\n    height: 300px;\n    a := Rectangle {\n        x: 10px;\n        y: 10px;\n        width: 100px;\n        height: 100px;\n    }\n}\n";
@@ -53,41 +53,114 @@ fn no_keyboard_means_no_bar() {
     assert!(!editor.get_bar_visible());
 }
 
-#[test]
-fn bar_opens_for_a_covered_props_field_and_commits_like_the_field() {
-    let (dir, editor) = start(300.);
-    assert!(editor.get_kb_shown());
+/// Selects the box, shows the Props tab and taps the first value field under the fake keyboard.
+fn open_bar(editor: &app::Editor) {
     editor.invoke_tapped(60., 60.);
     assert!(editor.get_has_selection());
     editor.set_panel_tab(2);
     slint::platform::update_timers_and_animations();
-    // Panel is the bottom 40% (hidden behind the fake keyboard); first row's value field.
-    let top = 760.0 - (760.0 - 52.0 - 52.0) * 0.4;
-    let row_y = top + 18.0 + 44.0 + 22.0;
-    assert!(!editor.get_bar_visible());
-    click(&editor, 250., row_y);
-    assert!(
-        editor.get_bar_visible(),
-        "bar should open for a covered field"
-    );
-    let name = editor.get_props().row_data(0).unwrap();
-    assert_eq!(editor.get_bar_text().as_str(), name.value.as_str());
+    // Portrait: toolbar 2 rows (104) + panel is the bottom 40% of the rest; handle 18, tabs 44.
+    let top = 760.0 - (760.0 - 104.0) * 0.4;
+    click(editor, 250., top + 18.0 + 44.0 + 22.0);
+    assert!(editor.get_bar_visible(), "bar should open for a covered field");
+}
 
-    // Typing in the bar and OK go through the same callbacks as the field itself.
-    editor.invoke_prop_accepted(name.name.clone(), "77px".into());
-    assert!(editor.get_dirty());
+fn key(editor: &app::Editor, text: impl Into<slint::SharedString>) {
+    let text = text.into();
+    editor.window().dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+    editor.window().dispatch_event(WindowEvent::KeyReleased { text });
+}
+
+/// Replaces the bar's text by typing into it.
+fn retype(editor: &app::Editor, value: &str) {
+    key(editor, char::from(slint::platform::Key::End));
+    for _ in 0..editor.get_bar_text().chars().count() {
+        key(editor, char::from(slint::platform::Key::Backspace));
+    }
+    for c in value.chars() {
+        key(editor, c);
+    }
+    assert_eq!(editor.get_bar_text().as_str(), value);
+}
+
+fn elapse(ms: u64) {
+    
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(ms));
+    slint::platform::update_timers_and_animations();
+}
+
+fn saved_after(editor: &app::Editor, dir: &tempfile::TempDir) -> String {
     editor.invoke_save();
-    // Whichever property row 0 is, it now holds 77px in the file.
-    assert!(saved(&dir).contains("77px"), "{}", saved(&dir));
+    saved(dir)
 }
 
 #[test]
-fn flush_applies_a_pending_debounced_edit() {
+fn typing_in_the_bar_applies_once_after_the_debounce() {
     let (dir, editor) = start(300.);
-    editor.invoke_tapped(60., 60.);
-    let name = editor.get_props().row_data(0).unwrap();
-    editor.invoke_prop_edited(name.name.clone(), "55px".into());
-    editor.invoke_prop_flush();
-    editor.invoke_save();
-    assert!(saved(&dir).contains("55px"), "{}", saved(&dir));
+    open_bar(&editor);
+    let before = editor.get_bar_text().to_string();
+    retype(&editor, "77px");
+    assert_eq!(editor.get_bar_text().as_str(), "77px");
+    assert!(!editor.get_dirty(), "not applied before the debounce");
+    elapse(400);
+    assert!(editor.get_dirty());
+    assert!(saved_after(&editor, &dir).contains("77px"));
+    // One history entry: a single undo restores the original.
+    editor.invoke_undo();
+    assert_eq!(saved_after(&editor, &dir), SRC, "{before}");
+}
+
+#[test]
+fn ok_then_keyboard_hide_does_not_apply_twice() {
+    let (dir, editor) = start(300.);
+    open_bar(&editor);
+    retype(&editor, "66px");
+    key(&editor, char::from(slint::platform::Key::Return));
+    slint::platform::update_timers_and_animations();
+    assert!(!editor.get_bar_visible(), "OK closes the bar");
+    assert!(saved_after(&editor, &dir).contains("66px"));
+    editor.set_fake_keyboard(0.);
+    slint::platform::update_timers_and_animations();
+    elapse(400);
+    editor.invoke_undo();
+    assert_eq!(saved_after(&editor, &dir), SRC, "a second apply left another history entry");
+}
+
+#[test]
+fn keyboard_hide_flushes_a_pending_bar_edit() {
+    let (dir, editor) = start(300.);
+    open_bar(&editor);
+    retype(&editor, "55px");
+    assert!(!editor.get_dirty());
+    editor.set_fake_keyboard(0.);
+    slint::platform::update_timers_and_animations();
+    assert!(!editor.get_bar_visible());
+    assert!(editor.get_dirty(), "hide applies the pending edit without waiting");
+    assert!(saved_after(&editor, &dir).contains("55px"));
+    // The stale field must not bring the bar back with the keyboard.
+    editor.set_fake_keyboard(300.);
+    slint::platform::update_timers_and_animations();
+    assert!(!editor.get_bar_visible());
+}
+
+#[test]
+fn tapping_the_canvas_closes_the_bar_and_leaves_the_new_selection_alone() {
+    let (dir, editor) = start(300.);
+    open_bar(&editor);
+    retype(&editor, "44px");
+    // Tap empty canvas: the pending edit goes to the old target, the selection changes.
+    editor.invoke_tapped(250., 250.);
+    slint::platform::update_timers_and_animations();
+    assert!(!editor.get_bar_visible());
+    let applied = saved_after(&editor, &dir);
+    assert!(applied.contains("44px"), "pending edit goes to the original target");
+    // Further typing after the bar is gone changes nothing.
+    key(&editor, '9');
+    elapse(400);
+    assert_eq!(saved_after(&editor, &dir), applied);
+    // Keyboard toggling does not resurrect the stale target.
+    editor.set_fake_keyboard(0.);
+    editor.set_fake_keyboard(300.);
+    slint::platform::update_timers_and_animations();
+    assert!(!editor.get_bar_visible());
 }

@@ -50,6 +50,7 @@ export component BottomPanel inherits Rectangle {
     callback prop-accepted(string, string);
     // A value field got focus: name, its text, and the window y of the field's bottom edge.
     callback value-focused(string, string, length);
+    callback value-blurred();
     callback source-apply(string);
     callback source-edited();
     callback tree-selected(int);
@@ -167,6 +168,8 @@ export component BottomPanel inherits Rectangle {
                         changed has-focus => {
                             if self.has-focus {
                                 root.value-focused(p.name, self.text, row.absolute-position.y + row.height);
+                            } else {
+                                root.value-blurred();
                             }
                         }
                         edited(t) => { root.prop-edited(p.name, t); }
@@ -176,22 +179,34 @@ export component BottomPanel inherits Rectangle {
             }
             if root.tab == 3: VerticalLayout {
                 padding: 4px;
-                // Only this area shrinks above the keyboard; Apply stays reachable.
+                // Only this area shrinks above the keyboard.
                 padding-bottom: 4px + root.kb-overlap;
                 spacing: 4px;
-                Text {
-                    text: root.source-title;
-                    color: #9aa3ad;
-                    font-size: 12px;
-                    overflow: elide;
+                // With the keyboard up, Apply moves next to the title so it stays above it.
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: root.source-title;
+                        color: #9aa3ad;
+                        font-size: 12px;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    if root.kb-overlap > 0px: ToolButton {
+                        text: "Apply";
+                        min-width: 72px;
+                        height: 44px;
+                        clicked => { root.source-apply(root.source-text); }
+                    }
                 }
                 src := TextEdit {
                     vertical-stretch: 1;
+                    min-height: 60px;
                     font-size: 13px;
                     text <=> root.source-text;
                     edited(_) => { root.source-edited(); }
                 }
-                ToolButton {
+                if root.kb-overlap <= 0px: ToolButton {
                     text: "Apply";
                     height: 44px;
                     clicked => { root.source-apply(src.text); }

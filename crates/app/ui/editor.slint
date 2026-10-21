@@ -107,19 +107,45 @@ export component Editor inherits Window {
     out property <bool> want-guide: cv.editing-prop != "" && root.kb-shown
         && root.content-y + cv.editing-y + 44px > root.kb-y;
     out property <bool> bar-visible: root.want-prop || root.want-guide;
-    changed want-prop => {
-        if !root.want-prop && !root.kb-shown && root.prop-editing != "" {
-            // Keyboard dismissed: what was typed is applied, the edit ends.
+    // Bumped by the glue whenever the Props rows are rebuilt (selection, document or undo changed).
+    in property <int> props-rev;
+    // props-rev when the field got focus: bar edits for an older target are rejected.
+    property <int> prop-rev-at;
+    property <bool> guide-bar-used;
+    // Ends a Props bar session: the pending edit is applied to its original target first.
+    function close-prop-bar() {
+        if root.prop-editing != "" {
             root.prop-editing = "";
             root.prop-flush();
         }
     }
+    // Ends a guide bar session after the keyboard went away: the typed number is kept.
+    function finish-guide-bar() {
+        if root.guide-bar-used {
+            root.guide-bar-used = false;
+            if cv.editing-prop != "" && root.bar-text != cv.editing-value {
+                root.guide-edited(cv.editing-prop, root.bar-text);
+            }
+            cv.editing-prop = "";
+        }
+    }
+    changed kb-shown => {
+        if !root.kb-shown {
+            root.close-prop-bar();
+            root.finish-guide-bar();
+        }
+    }
+    changed props-rev => { root.prop-editing = ""; }
+    changed panel-tab => { root.close-prop-bar(); }
     changed want-guide => {
         if root.want-guide {
-            root.prop-editing = "";
+            root.close-prop-bar();
+            root.guide-bar-used = true;
             root.bar-text = cv.editing-value;
         } else if !root.kb-shown {
-            cv.editing-prop = "";
+            root.finish-guide-bar();
+        } else if cv.editing-prop == "" {
+            root.guide-bar-used = false;
         }
     }
     property <length> panel-bottom: root.content-y + root.content-h;
@@ -270,9 +296,11 @@ export component Editor inherits Window {
         value-focused(n, t, b) => {
             root.prop-editing = n;
             root.prop-bottom = b;
+            root.prop-rev-at = root.props-rev;
             root.bar-text = t;
             root.bar-focus-rev += 1;
         }
+        value-blurred => { if !root.bar-visible { root.prop-editing = ""; } }
         prop-edited(n, v) => { root.prop-edited(n, v); }
         prop-accepted(n, v) => { root.prop-accepted(n, v); }
         source-apply(t) => { root.source-apply(t); }
@@ -291,22 +319,35 @@ export component Editor inherits Window {
         Text { text: "fake keyboard"; color: white; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
     }
 
-    if root.bar-visible: KbBar {
-        focus-rev: root.bar-focus-rev;
-        x: root.inset-left;
+    if root.bar-visible: Rectangle {
+        x: 0px;
         y: root.kb-y - root.bar-h;
-        width: root.content-w;
-        label: root.want-guide ? cv.editing-prop : root.prop-editing;
-        text <=> root.bar-text;
-        input-type: root.want-guide ? InputType.number : InputType.text;
-        edited(t) => { if !root.want-guide { root.prop-edited(root.prop-editing, t); } }
-        accepted(t) => {
-            if root.want-guide {
-                root.guide-edited(cv.editing-prop, t);
-                cv.editing-prop = "";
-            } else {
-                root.prop-accepted(root.prop-editing, t);
-                root.prop-editing = "";
+        width: root.width;
+        height: root.bar-h;
+        background: #2a2e33;
+        KbBar {
+            focus-rev: root.bar-focus-rev;
+            x: root.inset-left;
+            width: root.content-w;
+            label: root.want-guide ? cv.editing-prop : root.prop-editing;
+            text <=> root.bar-text;
+            input-type: root.want-guide ? InputType.number : InputType.text;
+            edited(t) => {
+                if !root.want-guide && root.prop-rev-at == root.props-rev {
+                    root.prop-edited(root.prop-editing, t);
+                }
+            }
+            accepted(t) => {
+                if root.want-guide {
+                    root.guide-bar-used = false;
+                    root.guide-edited(cv.editing-prop, t);
+                    cv.editing-prop = "";
+                } else {
+                    if root.prop-rev-at == root.props-rev {
+                        root.prop-accepted(root.prop-editing, t);
+                    }
+                    root.prop-editing = "";
+                }
             }
         }
     }

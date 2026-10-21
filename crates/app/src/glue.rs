@@ -312,7 +312,9 @@ impl Glue {
             .into_iter()
             .map(|r| PropItem { name: r.name.into(), value: r.expr.into() })
             .collect();
-        self.editor().set_props(ModelRc::new(VecModel::from(rows)));
+        let ed = self.editor();
+        ed.set_props(ModelRc::new(VecModel::from(rows)));
+        ed.set_props_rev(ed.get_props_rev().wrapping_add(1));
     }
 
     fn show_source(&mut self, range: Option<std::ops::Range<usize>>, title: &str) {
@@ -1055,6 +1057,7 @@ fn commit_when_free(me: Weak<RefCell<Glue>>) {
     }
 }
 
+#[cfg(debug_assertions)]
 /// Debug hook: `PETARICON_FAKE_KEYBOARD=<height>` pretends an on-screen keyboard of that many
 /// logical pixels is up, so the input bar can be tried on a desktop.
 fn fake_keyboard_height() -> Option<f32> {
@@ -1137,6 +1140,7 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
         })
     });
     connect(editor, &glue);
+    #[cfg(debug_assertions)]
     if let Some(h) = fake_keyboard_height() {
         editor.set_fake_keyboard(h);
     }
