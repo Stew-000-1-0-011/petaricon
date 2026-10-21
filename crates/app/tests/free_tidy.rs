@@ -193,3 +193,35 @@ fn report_maps_members_to_child_paths() {
     assert_eq!(r.children.len(), 6);
     assert_eq!(r.children[2], path(&[0, 2]));
 }
+
+#[test]
+fn text_already_holding_the_rendered_value_is_not_a_change() {
+    // Geometry says 10.4 (fractional literal), the tidy result renders as 10px = the written text.
+    let body = "        Rectangle { x: 10px; y: 10px; width: 40px; height: 30px; }\n        Rectangle { x: 10px; y: 100px; width: 40px; height: 30px; }\n";
+    let mut s = session_with(body);
+    let before = s.doc().text().to_string();
+    let r = s.tidy_free_selection(16.0).unwrap();
+    assert_eq!((r.changed, s.doc().text()), (0, before.as_str()));
+    assert!(!s.undo());
+}
+
+#[test]
+fn changed_counts_only_text_changes() {
+    let mut s = session_with(&l_shape());
+    let before = s.doc().text().to_string();
+    let r = s.tidy_free_selection(16.0).unwrap();
+    let after = s.doc().text().to_string();
+    let differing = before.lines().zip(after.lines()).filter(|(a, b)| a != b).count();
+    assert_eq!(r.changed, differing);
+}
+
+#[test]
+fn refuses_when_the_preview_is_not_built_from_the_current_text() {
+    let mut s = session_with(&l_shape());
+    s.set_property("width", "301").unwrap(); // edit without rebuilding
+    let before = s.doc().text().to_string();
+    let e = s.tidy_free_selection(16.0).unwrap_err();
+    assert!(matches!(e, SessionError::PreviewUpdating), "{e:?}");
+    assert!(e.to_string().contains("プレビューを更新中"));
+    assert_eq!(s.doc().text(), before);
+}

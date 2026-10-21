@@ -28,6 +28,8 @@ pub enum SessionError {
     NotALayout,
     #[error("the selection is a layout; use Unstack to free its children first")]
     TidyOnLayout,
+    #[error("プレビューを更新中です。もう一度押してください")]
+    PreviewUpdating,
     #[error("the container has no children to tidy")]
     NoChildren,
     #[error("the element has no geometry in the preview")]
@@ -970,6 +972,9 @@ impl Session {
     pub fn tidy_free_selection(&mut self, tolerance: f32) -> Result<TidyReport, SessionError> {
         let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
         self.refuse_if_stale()?;
+        if self.snapshot.borrow().text() != self.doc.text() {
+            return Err(SessionError::PreviewUpdating);
+        }
         let info = self
             .doc
             .element(&path)
@@ -1018,18 +1023,21 @@ impl Session {
         let mut changed = 0;
         for ((ci, old), new) in infos.iter().zip(&children).zip(&out.rects) {
             let mut bindings = Vec::new();
-            let mut set = |name: &str, v: f32| bindings.push((name.to_string(), Some(format!("{}px", v.round() as i32))));
-            if !near(old.rect.x, new.x) {
-                set("x", new.x);
+            let current = |n: &str| ci.bindings.iter().find(|b| b.name == n).map(|b| b.expr.trim());
+            let mut set = |name: &str, old: f32, new: f32| {
+                let text = format!("{}px", new.round() as i32);
+                // Only a different written value counts as a change.
+                if !near(old, new) && current(name) != Some(text.as_str()) {
+                    bindings.push((name.to_string(), Some(text)));
+                }
+            };
+            set("x", old.rect.x, new.x);
+            set("y", old.rect.y, new.y);
+            if old.w_explicit {
+                set("width", old.rect.w, new.w);
             }
-            if !near(old.rect.y, new.y) {
-                set("y", new.y);
-            }
-            if old.w_explicit && !near(old.rect.w, new.w) {
-                set("width", new.w);
-            }
-            if old.h_explicit && !near(old.rect.h, new.h) {
-                set("height", new.h);
+            if old.h_explicit {
+                set("height", old.rect.h, new.h);
             }
             if bindings.is_empty() {
                 continue;
