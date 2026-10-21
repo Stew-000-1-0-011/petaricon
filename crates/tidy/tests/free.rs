@@ -102,8 +102,8 @@ fn near_grid_becomes_exact_grid() {
             al(Axis::Y, vec![3, 4, 5], 142.),
             gap(vec![0, 1, 2]),
             gap(vec![3, 4, 5]),
-            rp(220., 0., vec![(3, 5), (0, 2)]),
-            rp(110., 0., vec![(4, 5), (0, 1), (3, 4), (1, 2)]),
+            // the two rows are chains; their skip pairs (220, 0) are implied
+            rp(110., 0., vec![(0, 1), (1, 2), (3, 4), (4, 5)]),
             rp(110., -103., vec![(3, 1), (4, 2)]),
             rp(110., 103., vec![(1, 5), (0, 4)]),
             rp(0., 103., vec![(1, 4), (0, 3), (2, 5)]),
@@ -312,7 +312,7 @@ fn input_order_does_not_matter() {
     ];
     for perm in perms {
         let shuffled: Vec<Child> = perm.iter().map(|&i| kids[i]).collect();
-        let o = tidy(400., 300., &shuffled, 16.);
+        let o = tidy(1000., 1000., &shuffled, 16.);
         for (pos, &orig) in perm.iter().enumerate() {
             assert_eq!(
                 o.rects[pos], base.rects[orig],
@@ -466,9 +466,23 @@ impl Lcg {
 fn shuffled_input_gives_identical_output_and_relations_hold() {
     let mut rng = Lcg(2024);
     let mut checked = 0;
+    let mut chains_seen = 0;
     for case in 0..60 {
         let mut kids: Vec<Child> = Vec::new();
-        if case % 2 == 0 {
+        if case % 3 == 2 {
+            // diagonal / stepped chain (3-5 elements) plus a stray element
+            let len = 3 + case % 3;
+            let (sx, sy) = (rng.range(-120, 120), rng.range(16, 240));
+            for k in 0..len {
+                kids.push(c(
+                    300. + sx * k as f32 + rng.range(-6, 6),
+                    20. + sy * k as f32 / 2. + rng.range(-6, 6),
+                    50.,
+                    50.,
+                ));
+            }
+            kids.push(c(rng.range(0, 600), rng.range(0, 600), 44., 44.));
+        } else if case % 3 == 0 {
             // near-regular grid with jitter and the odd size
             let (rows, cols) = (1 + case % 4, 2 + case % 3);
             for rr in 0..rows {
@@ -498,8 +512,15 @@ fn shuffled_input_gives_identical_output_and_relations_hold() {
                 });
             }
         }
-        let base = tidy(400., 300., &kids, 16.);
+        let base = tidy(1000., 1000., &kids, 16.);
         assert_relations_hold(&base);
+        if case % 3 == 2
+            && repeats(&base)
+                .iter()
+                .any(|(_, _, p)| p.windows(2).any(|w| w[0].1 == w[1].0))
+        {
+            chains_seen += 1;
+        }
         for (k, rc) in base.rects.iter().enumerate() {
             let src = kids[k].rect;
             assert!(
@@ -514,7 +535,7 @@ fn shuffled_input_gives_identical_output_and_relations_hold() {
                 perm.swap(i, (rng.next() as usize) % (i + 1));
             }
             let shuffled: Vec<Child> = perm.iter().map(|&i| kids[i]).collect();
-            let o = tidy(400., 300., &shuffled, 16.);
+            let o = tidy(1000., 1000., &shuffled, 16.);
             assert_relations_hold(&o);
             for (pos, &orig) in perm.iter().enumerate() {
                 assert_eq!(
@@ -526,6 +547,7 @@ fn shuffled_input_gives_identical_output_and_relations_hold() {
         }
     }
     assert_eq!(checked, 720);
+    assert!(chains_seen >= 10, "chain layouts were not exercised: {chains_seen}");
 }
 
 #[test]
@@ -555,4 +577,177 @@ fn near_vertical_repeat_is_not_split_by_sign() {
         o.relations
     );
     assert_eq!((best.0, best.1), (0., 80.));
+}
+
+// ---- chains (diagonal / stepped sequences) ---------------------------------
+
+type RepeatInfo = (f32, f32, Vec<(usize, usize)>);
+
+fn repeats(o: &Outcome) -> Vec<RepeatInfo> {
+    o.relations
+        .iter()
+        .filter_map(|x| match x {
+            Relation::Repeat { dx, dy, pairs } => Some((*dx, *dy, pairs.clone())),
+            _ => None,
+        })
+        .collect()
+}
+fn aligns(o: &Outcome) -> Vec<&Relation> {
+    o.relations
+        .iter()
+        .filter(|x| matches!(x, Relation::Align { .. }))
+        .collect()
+}
+fn assert_moves_within(o: &Outcome, kids: &[Child], t: f32) {
+    for (rc, k) in o.rects.iter().zip(kids) {
+        assert!((rc.x - k.rect.x).abs() <= t && (rc.y - k.rect.y).abs() <= t);
+    }
+}
+
+#[test]
+fn diagonal_chain_gets_equal_steps() {
+    let kids = [
+        c(43., 16., 60., 60.),
+        c(135., 245., 60., 60.),
+        c(244., 457., 60., 60.),
+        c(338., 686., 60., 60.),
+    ];
+    let o = tidy(800., 1200., &kids, 16.);
+    assert_eq!(
+        rects(&o),
+        vec![
+            (42., 18., 60., 60.),
+            (141., 240., 60., 60.),
+            (240., 462., 60., 60.),
+            (339., 684., 60., 60.)
+        ]
+    );
+    assert_eq!(
+        o.relations,
+        vec![Relation::Repeat {
+            dx: 99.,
+            dy: 222.,
+            pairs: vec![(0, 1), (1, 2), (2, 3)]
+        }]
+    );
+    assert!(aligns(&o).is_empty());
+    assert_relations_hold(&o);
+    assert_moves_within(&o, &kids, 16.);
+}
+
+#[test]
+fn small_x_step_diagonal_is_not_split_into_columns() {
+    // x step 15 > T/2: the columns {0,1} and {2,3} must not be formed
+    let kids = [
+        c(101., 48., 40., 40.),
+        c(113., 123., 40., 40.),
+        c(132., 187., 40., 40.),
+        c(144., 262., 40., 40.),
+    ];
+    let o = tidy(800., 800., &kids, 16.);
+    let rs = rects(&o);
+    assert_eq!(
+        rs.iter().map(|r| r.0).collect::<Vec<_>>(),
+        vec![100., 115., 130., 145.]
+    );
+    let ys: Vec<f32> = rs.iter().map(|r| r.1).collect();
+    assert_eq!(ys[1] - ys[0], ys[2] - ys[1]);
+    assert_eq!(ys[2] - ys[1], ys[3] - ys[2]);
+    assert!(aligns(&o).is_empty(), "{:?}", o.relations);
+    let reps = repeats(&o);
+    assert_eq!(reps.len(), 1, "{:?}", o.relations);
+    assert_eq!(
+        (reps[0].0, reps[0].2.clone()),
+        (15., vec![(0, 1), (1, 2), (2, 3)])
+    );
+    assert_relations_hold(&o);
+    assert_moves_within(&o, &kids, 16.);
+}
+
+#[test]
+fn nearly_vertical_chain_is_a_column_with_equal_steps() {
+    let kids = [
+        c(100., 22., 40., 40.),
+        c(103., 100., 40., 40.),
+        c(98., 180., 40., 40.),
+        c(101., 258., 40., 40.),
+    ];
+    let o = tidy(800., 800., &kids, 16.);
+    assert_eq!(
+        rects(&o),
+        vec![
+            (101., 22., 40., 40.),
+            (101., 101., 40., 40.),
+            (101., 180., 40., 40.),
+            (101., 259., 40., 40.)
+        ]
+    );
+    assert!(has_align(&o, Axis::X, Anchor::Start, &[0, 1, 2, 3], 101.));
+    let reps = repeats(&o);
+    assert_eq!(reps.len(), 1, "{:?}", o.relations);
+    assert_eq!((reps[0].0, reps[0].1), (0., 79.));
+    assert_eq!(reps[0].2, vec![(0, 1), (1, 2), (2, 3)]);
+    assert_relations_hold(&o);
+}
+
+#[test]
+fn staircase_with_alternating_steps_is_not_a_chain() {
+    // steps (100,40), (40,100), (100,40): consecutive steps differ by 60 > T
+    let kids = [
+        c(20., 20., 40., 40.),
+        c(120., 60., 40., 40.),
+        c(160., 160., 40., 40.),
+        c(260., 200., 40., 40.),
+    ];
+    let o = tidy(1000., 1000., &kids, 16.);
+    for (rc, k) in o.rects.iter().zip(&kids) {
+        assert_eq!(*rc, k.rect);
+    }
+    for (_, _, pairs) in repeats(&o) {
+        // no pair may share an element: that would be a chain
+        for (a, p) in pairs.iter().enumerate() {
+            for q in &pairs[a + 1..] {
+                assert!(
+                    p.0 != q.0 && p.1 != q.1 && p.0 != q.1 && p.1 != q.0,
+                    "{:?}",
+                    o.relations
+                );
+            }
+        }
+    }
+    assert_relations_hold(&o);
+    assert_moves_within(&o, &kids, 16.);
+}
+
+#[test]
+fn unrelated_element_next_to_a_chain_is_untouched() {
+    let kids = [
+        c(43., 16., 60., 60.),
+        c(135., 245., 60., 60.),
+        c(244., 457., 60., 60.),
+        c(338., 686., 60., 60.),
+        c(601.3, 333.7, 50., 30.),
+    ];
+    let o = tidy(800., 1200., &kids, 16.);
+    assert_eq!(o.rects[4], kids[4].rect);
+    for rel in &o.relations {
+        let touches = match rel {
+            Relation::Repeat { pairs, .. } => pairs.iter().any(|p| p.0 == 4 || p.1 == 4),
+            Relation::Align { members, .. } | Relation::EqualGap { members, .. } => {
+                members.contains(&4)
+            }
+            _ => false,
+        };
+        assert!(!touches, "{rel:?}");
+    }
+    assert_eq!(
+        o.rects[1],
+        Rect {
+            x: 141.,
+            y: 240.,
+            w: 60.,
+            h: 60.
+        }
+    );
+    assert_relations_hold(&o);
 }

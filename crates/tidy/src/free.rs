@@ -140,7 +140,11 @@ struct AlignCl {
 }
 
 /// Step 3.2-1: one alignment cluster per element and axis.
-fn align_clusters(g: &[G], a: Axis, t: f64) -> Vec<AlignCl> {
+///
+/// `chains` lists, for this axis, the chains (in order along the chain) whose
+/// step on the axis is too large to count as aligned: a cluster never holds two
+/// members of the same chain; only the member earliest in the chain stays.
+fn align_clusters(g: &[G], a: Axis, t: f64, chains: &[&[usize]]) -> Vec<AlignCl> {
     struct Cand {
         anchor_rank: usize,
         members: Vec<usize>,
@@ -153,7 +157,14 @@ fn align_clusters(g: &[G], a: Axis, t: f64) -> Vec<AlignCl> {
         let mut items: Vec<(f64, usize)> = (0..n)
             .map(|i| (pos(g, i, a) + anchor_off(anchor, size(g, i, a)), i))
             .collect();
-        for members in cluster(&mut items, t, 2) {
+        for mut members in cluster(&mut items, t, 2) {
+            for chain in chains {
+                let first = chain.iter().find(|i| members.contains(i)).copied();
+                members.retain(|i| Some(*i) == first || !chain.contains(i));
+            }
+            if members.len() < 2 {
+                continue;
+            }
             let vals = members
                 .iter()
                 .map(|&i| pos(g, i, a) + anchor_off(anchor, size(g, i, a)));
@@ -428,16 +439,134 @@ fn key_pair(g: &[G], i: usize, j: usize) -> (G, G) {
 
 struct Rep {
     pairs: Vec<(usize, usize)>,
+    /// Chains (elements in order along the chain) behind `pairs`; empty for a
+    /// plain pair cluster.
+    chains: Vec<Vec<usize>>,
+    /// Per axis: the mean step is at most T/2, so the chain counts as aligned
+    /// there and its step on that axis is 0.
+    zero: [bool; 2],
+    /// Per axis: index of the free step variable (unused when `zero`).
+    vars: [usize; 2],
 }
 
-/// Step 3.2-3: clusters of near-identical offset vectors.
-fn find_repeats(g: &[G], t: f64) -> Vec<Rep> {
-    struct V {
-        dx: f64,
-        dy: f64,
-        i: usize,
-        j: usize,
+/// An offset vector from element `i` to element `j` (start positions).
+struct V {
+    dx: f64,
+    dy: f64,
+    i: usize,
+    j: usize,
+}
+
+/// Unused vectors similar to `vs[s]` (both components within `t`), narrowed
+/// to the densest dy-window of width `t` that contains the seed (`t` here is
+/// the window width).  `vs` is
+/// sorted by dx.
+fn similar(vs: &[V], used: &[bool], s: usize, t: f64) -> Vec<usize> {
+    let (sx, sy) = (vs[s].dx, vs[s].dy);
+    let mut cand: Vec<usize> = Vec::new();
+    for k in s..vs.len() {
+        if vs[k].dx - sx > t {
+            break;
+        }
+        if !used[k] && (vs[k].dy - sy).abs() <= t {
+            cand.push(k);
+        }
     }
+    cand.sort_by(|&p, &q| vs[p].dy.total_cmp(&vs[q].dy).then(p.cmp(&q)));
+    let mut best: Vec<usize> = Vec::new();
+    for &first in &cand {
+        let lo = vs[first].dy;
+        if lo > sy {
+            break;
+        }
+        let win: Vec<usize> = cand
+            .iter()
+            .copied()
+            .filter(|&k| vs[k].dy >= lo && vs[k].dy - lo <= t)
+            .collect();
+        if win.contains(&s) && win.len() > best.len() {
+            best = win;
+        }
+    }
+    best
+}
+
+/// Largest difference (in units of the tolerance) between the steps of a chain.
+const CHAIN_SPREAD: f64 = 1.5;
+
+fn mean_step(vs: &[V], edges: &[usize]) -> (f64, f64) {
+    let m = edges.len() as f64;
+    (
+        edges.iter().map(|&k| vs[k].dx).sum::<f64>() / m,
+        edges.iter().map(|&k| vs[k].dy).sum::<f64>() / m,
+    )
+}
+
+/// The longest path (>= 3 elements) through `edges`, ordered along their mean
+/// step by projection onto it.  Returns the edge indices along the path in
+/// the direction of the mean step.  Ties are broken by closeness to the mean
+/// step and then by geometry, never by input index.
+fn longest_path(g: &[G], vs: &[V], edges: &[usize]) -> Option<Vec<usize>> {
+    let (mx, my) = mean_step(vs, edges);
+    let proj = |i: usize| g[i][0] * mx + g[i][1] * my;
+    let mut nodes: Vec<usize> = edges.iter().flat_map(|&k| [vs[k].i, vs[k].j]).collect();
+    nodes.sort_by(|&p, &q| {
+        proj(p)
+            .total_cmp(&proj(q))
+            .then_with(|| cmp_geo(&g[p], &g[q]))
+            .then(p.cmp(&q))
+    });
+    nodes.dedup();
+    // (path length in edges, summed deviation from the mean step, last edge)
+    let mut best: Vec<Option<(usize, f64, usize)>> = vec![None; g.len()];
+    let mut end: Option<usize> = None;
+    let better = |a: &(usize, f64, usize), b: &(usize, f64, usize)| -> bool {
+        a.0.cmp(&b.0)
+            .then(b.1.total_cmp(&a.1))
+            .then_with(|| cmp_geo(&g[vs[b.2].i], &g[vs[a.2].i]))
+            == Ordering::Greater
+    };
+    for &j in &nodes {
+        let mut cur: Option<(usize, f64, usize)> = None;
+        for &k in edges.iter().filter(|&&k| vs[k].j == j) {
+            let i = vs[k].i;
+            if proj(i) >= proj(j) {
+                continue;
+            }
+            let (len, cost) = best[i].map_or((0, 0.0), |b| (b.0, b.1));
+            let cand = (
+                len + 1,
+                cost + (vs[k].dx - mx).abs() + (vs[k].dy - my).abs(),
+                k,
+            );
+            if cur.as_ref().is_none_or(|c| better(&cand, c)) {
+                cur = Some(cand);
+            }
+        }
+        best[j] = cur;
+        if let Some(c) = &cur {
+            let e = end.map(|e| best[e].expect("set"));
+            if e.as_ref()
+                .is_none_or(|b| c.0.cmp(&b.0).then(b.1.total_cmp(&c.1)) == Ordering::Greater)
+            {
+                end = Some(j);
+            }
+        }
+    }
+    let mut node = end?;
+    let mut path = Vec::new();
+    while let Some((_, _, k)) = best[node] {
+        path.push(k);
+        node = vs[k].i;
+    }
+    path.reverse();
+    if path.len() >= 2 { Some(path) } else { None }
+}
+
+/// Step 3.2-3: chains first (sequences of >= 3 elements whose consecutive
+/// offset vectors all agree within `t`), then clusters of near-identical
+/// offset vectors between the remaining pairs.
+fn find_repeats(g: &[G], t: f64) -> Vec<Rep> {
     let n = g.len();
     // Both orientations of every pair are clustered (a single canonical sign
     // would split near-vertical or near-diagonal vectors); a cluster and its
@@ -468,40 +597,77 @@ fn find_repeats(g: &[G], t: f64) -> Vec<Rep> {
         .enumerate()
         .map(|(k, v)| ((v.i, v.j), k))
         .collect();
-    let mut used = vec![false; vs.len()];
     let mut out = Vec::new();
+
+    // chains
+    let mut used = vec![false; vs.len()];
+    let mut chain_of: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut n_chains = 0;
     for s in 0..vs.len() {
         if used[s] {
             continue;
         }
-        let (sx, sy) = (vs[s].dx, vs[s].dy);
-        // Candidates sorted by dx: only a bounded window can be within t.
-        let mut cand: Vec<usize> = Vec::new();
-        for k in s..vs.len() {
-            if vs[k].dx - sx > t {
+        // Jitter of +-3t/8 on the positions changes a step by up to 3t/4, so
+        // the steps of a chain may differ by up to CHAIN_SPREAD * t.
+        let mut edges = similar(&vs, &used, s, CHAIN_SPREAD * t);
+        let mut group: Vec<Vec<usize>> = Vec::new();
+        while edges.len() >= 2 {
+            let Some(path) = longest_path(g, &vs, &edges) else {
                 break;
-            }
-            if !used[k] && (vs[k].dy - sy).abs() <= t {
-                cand.push(k);
-            }
-        }
-        cand.sort_by(|&p, &q| vs[p].dy.total_cmp(&vs[q].dy).then(p.cmp(&q)));
-        // densest dy-window of width t that contains the seed
-        let mut best: Vec<usize> = Vec::new();
-        for &first in &cand {
-            let lo = vs[first].dy;
-            if lo > sy {
-                break;
-            }
-            let win: Vec<usize> = cand
+            };
+            let mut nodes: Vec<usize> = path.iter().map(|&k| vs[k].i).collect();
+            nodes.push(vs[*path.last().expect("non-empty")].j);
+            // dominant step component positive, like the reported relation
+            let (sx, sy) = path
                 .iter()
-                .copied()
-                .filter(|&k| vs[k].dy >= lo && vs[k].dy - lo <= t)
-                .collect();
-            if win.contains(&s) && win.len() > best.len() {
-                best = win;
+                .fold((0.0, 0.0), |(x, y), &k| (x + vs[k].dx, y + vs[k].dy));
+            if (sx.abs() >= sy.abs() && sx < 0.0) || (sx.abs() < sy.abs() && sy < 0.0) {
+                nodes.reverse();
+            }
+            for &k in &path {
+                used[k] = true;
+                used[index[&(vs[k].j, vs[k].i)]] = true;
+            }
+            edges.retain(|k| !used[*k]);
+            for &i in &nodes {
+                chain_of[i].push(n_chains);
+            }
+            n_chains += 1;
+            group.push(nodes);
+        }
+        if group.is_empty() {
+            continue;
+        }
+        let mut pairs = Vec::new();
+        let (mut sx, mut sy) = (0.0, 0.0);
+        for ch in &group {
+            for w in ch.windows(2) {
+                pairs.push((w[0], w[1]));
+                sx += g[w[1]][0] - g[w[0]][0];
+                sy += g[w[1]][1] - g[w[0]][1];
             }
         }
+        let cnt = pairs.len() as f64;
+        out.push(Rep {
+            pairs,
+            chains: group,
+            zero: [(sx / cnt).abs() <= t / 2.0, (sy / cnt).abs() <= t / 2.0],
+            vars: [0; 2],
+        });
+    }
+
+    // pair clusters; a vector between two members of one chain is implied by it
+    let mut used = vec![false; vs.len()];
+    for (k, v) in vs.iter().enumerate() {
+        if chain_of[v.i].iter().any(|c| chain_of[v.j].contains(c)) {
+            used[k] = true;
+        }
+    }
+    for s in 0..vs.len() {
+        if used[s] {
+            continue;
+        }
+        let best = similar(&vs, &used, s, t);
         for &k in &best {
             used[k] = true;
             used[index[&(vs[k].j, vs[k].i)]] = true;
@@ -523,7 +689,12 @@ fn find_repeats(g: &[G], t: f64) -> Vec<Rep> {
             pairs.push((i, j));
         }
         if pairs.len() >= 2 {
-            out.push(Rep { pairs });
+            out.push(Rep {
+                pairs,
+                chains: Vec::new(),
+                zero: [false; 2],
+                vars: [0; 2],
+            });
         }
     }
     out
@@ -560,7 +731,27 @@ fn solve_all(
         let k = ax(a);
         let p0: Vec<f64> = (0..n).map(|i| pos(orig, i, a)).collect();
         let inv = eqs[k].involved(n, on);
-        let sol = solve_axis(&p0, &eqs[k], on);
+        let mut sol = solve_axis(&p0, &eqs[k], on);
+        if on.contains(&Kind::Repeat) {
+            // A chain gets an integer step: the solved positions lie on a line
+            // a + k*d; with d rounded, the offset a is the rounded mean.
+            for rep in &found.repeats {
+                let d_real = if rep.zero[k] { 0.0 } else { sol[rep.vars[k]] };
+                let d = round_coord(d_real);
+                for ch in &rep.chains {
+                    let base = ch
+                        .iter()
+                        .enumerate()
+                        .map(|(q, &i)| sol[i] - q as f64 * d)
+                        .sum::<f64>()
+                        / ch.len() as f64;
+                    let base = round_coord(base);
+                    for (q, &i) in ch.iter().enumerate() {
+                        sol[i] = base + q as f64 * d;
+                    }
+                }
+            }
+        }
         let mut p: Vec<f64> = (0..n)
             .map(|i| if inv[i] { round_coord(sol[i]) } else { p0[i] })
             .collect();
@@ -758,13 +949,22 @@ pub fn tidy(container_w: f32, container_h: f32, children: &[Child], tolerance: f
         }
     };
     let mut eqs = [AxisEqs::default(), AxisEqs::default()];
+    // 3.2-3 first: chains decide which alignments are allowed (3.2-1)
+    let repeats = find_repeats(&g, t);
+    let steep = |k: usize| -> Vec<&[usize]> {
+        repeats
+            .iter()
+            .filter(|r| !r.zero[k])
+            .flat_map(|r| r.chains.iter().map(|c| c.as_slice()))
+            .collect()
+    };
     let mut found = Found {
         aligns: [
-            align_clusters(&g, Axis::X, t),
-            align_clusters(&g, Axis::Y, t),
+            align_clusters(&g, Axis::X, t, &steep(0)),
+            align_clusters(&g, Axis::Y, t, &steep(1)),
         ],
         gap_groups: Vec::new(),
-        repeats: Vec::new(),
+        repeats,
         syms: Vec::new(),
     };
 
@@ -817,15 +1017,22 @@ pub fn tidy(container_w: f32, container_h: f32, children: &[Child], tolerance: f
         }
     }
 
-    // 3.2-3 repeated offsets: p_j - p_i = d_group on both axes
-    found.repeats = find_repeats(&g, t);
-    for rep in &found.repeats {
+    // 3.2-3 repeated offsets: p_j - p_i = d_group on both axes (0 on an
+    // axis where the chain counts as aligned)
+    for r in 0..found.repeats.len() {
         for a in AXES {
-            let var = eqs[ax(a)].new_var(n);
-            for &(i, j) in &rep.pairs {
-                eqs[ax(a)].eqs.push(Eq {
+            let k = ax(a);
+            let zero = found.repeats[r].zero[k];
+            let var = if zero { None } else { Some(eqs[k].new_var(n)) };
+            found.repeats[r].vars[k] = var.unwrap_or(usize::MAX);
+            for &(i, j) in &found.repeats[r].pairs {
+                let mut terms = vec![(j, 1.0), (i, -1.0)];
+                if let Some(v) = var {
+                    terms.push((v, -1.0));
+                }
+                eqs[k].eqs.push(Eq {
                     kind: Kind::Repeat,
-                    terms: vec![(j, 1.0), (i, -1.0), (var, -1.0)],
+                    terms,
                     b: 0.0,
                 });
             }
