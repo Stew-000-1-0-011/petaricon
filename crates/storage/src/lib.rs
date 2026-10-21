@@ -19,7 +19,12 @@ pub trait ProjectStore {
     fn files(&self, project: &str) -> io::Result<Vec<String>>;
     /// Creates `{name}.slint` (the extension is appended when missing) from the project
     /// template and returns the final file name. `AlreadyExists` when it is there.
-    fn create_file(&self, project: &str, name: &str) -> io::Result<String>;
+    fn create_file(&self, project: &str, name: &str) -> io::Result<String> {
+        self.create_file_with(project, name, MAIN_TEMPLATE)
+    }
+    /// Like `create_file`, but the new file starts with `text`: no `.bak` is produced and
+    /// nothing is left behind when it fails.
+    fn create_file_with(&self, project: &str, name: &str, text: &str) -> io::Result<String>;
     /// Renames a file together with its `.bak` and recovery copy; never overwrites. Returns
     /// the final name (`.slint` appended when missing).
     fn rename_file(&self, project: &str, old: &str, new: &str) -> io::Result<String>;
@@ -124,12 +129,16 @@ impl ProjectStore for LocalStore {
         fs::write(dir.join("main.slint"), MAIN_TEMPLATE)
     }
 
-    fn create_file(&self, project: &str, name: &str) -> io::Result<String> {
+    fn create_file_with(&self, project: &str, name: &str, text: &str) -> io::Result<String> {
         check_name(name)?;
         let name = with_extension_slint(name);
         let path = self.file_path(project, &name)?;
-        let mut f = fs::OpenOptions::new().write(true).create_new(true).open(path)?;
-        io::Write::write_all(&mut f, MAIN_TEMPLATE.as_bytes())?;
+        let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
+        if let Err(e) = io::Write::write_all(&mut f, text.as_bytes()).and_then(|()| f.sync_all()) {
+            drop(f);
+            let _ = fs::remove_file(&path);
+            return Err(e);
+        }
         Ok(name)
     }
 
@@ -157,10 +166,17 @@ impl ProjectStore for LocalStore {
         }
         let from_rec = self.recovery_path(project, old)?;
         let to_rec = self.recovery_path(project, &new)?;
+        let to_bak = to.with_file_name(format!("{new}.bak"));
+        if to_bak.exists() || to_rec.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{new} has a backup or recovery copy"),
+            ));
+        }
         fs::rename(&from, &to)?;
         rename_if_exists(
             &from.with_file_name(format!("{old}.bak")),
-            &to.with_file_name(format!("{new}.bak")),
+            &to_bak,
         )?;
         rename_if_exists(&from_rec, &to_rec)?;
         if self.last_open()? == Some((project.to_string(), old.to_string())) {
@@ -514,6 +530,41 @@ mod tests {
             assert_eq!(s.rename_project(n, "z").unwrap_err().kind(), io::ErrorKind::InvalidInput, "{n:?}");
         }
         assert_eq!(s.projects().unwrap(), vec!["p", "q"]);
+    }
+
+    #[test]
+    fn create_file_with_writes_text_directly_without_bak() {
+        let (d, s) = store();
+        s.create_project("p").unwrap();
+        assert_eq!(s.create_file_with("p", "c", "hello").unwrap(), "c.slint");
+        assert_eq!(s.read("p", "c.slint").unwrap(), "hello");
+        assert!(!d.path().join("projects/p/c.slint.bak").exists());
+        assert_eq!(
+            s.create_file_with("p", "c", "x").unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(s.read("p", "c.slint").unwrap(), "hello");
+        assert_eq!(
+            s.create_file_with("p", "../x", "x").unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn rename_file_refuses_when_target_bak_or_recovery_exist() {
+        let (d, s) = store();
+        s.create_project("p").unwrap();
+        s.write("p", "a.slint", "A").unwrap();
+        let dir = d.path().join("projects/p");
+        std::fs::write(dir.join("b.slint.bak"), "old bak").unwrap();
+        assert_eq!(s.rename_file("p", "a.slint", "b").unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(dir.join("b.slint.bak")).unwrap(), "old bak");
+        assert!(dir.join("a.slint").exists() && !dir.join("b.slint").exists());
+        std::fs::remove_file(dir.join("b.slint.bak")).unwrap();
+        s.write_recovery("p", "b.slint", "old draft").unwrap();
+        assert_eq!(s.rename_file("p", "a.slint", "b").unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(s.take_recovery("p", "b.slint").unwrap().as_deref(), Some("old draft"));
+        assert!(dir.join("a.slint").exists() && !dir.join("b.slint").exists());
     }
 
     #[test]

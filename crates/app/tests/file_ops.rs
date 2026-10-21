@@ -284,13 +284,19 @@ fn new_file_in_another_project_opens_it_there() {
 struct Flaky {
     inner: LocalStore,
     fail_writes: Rc<Cell<bool>>,
+    fail_creates: Rc<Cell<bool>>,
 }
 
 impl ProjectStore for Flaky {
     fn projects(&self) -> io::Result<Vec<String>> { self.inner.projects() }
     fn create_project(&self, n: &str) -> io::Result<()> { self.inner.create_project(n) }
     fn files(&self, p: &str) -> io::Result<Vec<String>> { self.inner.files(p) }
-    fn create_file(&self, p: &str, n: &str) -> io::Result<String> { self.inner.create_file(p, n) }
+    fn create_file_with(&self, p: &str, n: &str, t: &str) -> io::Result<String> {
+        if self.fail_creates.get() {
+            return Err(io::Error::other("no space"));
+        }
+        self.inner.create_file_with(p, n, t)
+    }
     fn rename_file(&self, p: &str, o: &str, n: &str) -> io::Result<String> { self.inner.rename_file(p, o, n) }
     fn rename_project(&self, o: &str, n: &str) -> io::Result<()> { self.inner.rename_project(o, n) }
     fn read(&self, p: &str, f: &str) -> io::Result<String> { self.inner.read(p, f) }
@@ -311,7 +317,7 @@ impl ProjectStore for Flaky {
 fn rename_is_aborted_when_the_save_before_it_fails() {
     let (dir, inner) = seeded();
     let fail = Rc::new(Cell::new(false));
-    let editor = start(Box::new(Flaky { inner, fail_writes: fail.clone() }));
+    let editor = start(Box::new(Flaky { inner, fail_writes: fail.clone(), fail_creates: Rc::new(Cell::new(false)) }));
     make_dirty(&editor);
     fail.set(true);
     for (mode, name) in [(RENAME_FILE, "renamed"), (RENAME_PROJECT, "proj2")] {
@@ -332,7 +338,7 @@ fn rename_is_aborted_when_the_save_before_it_fails() {
 fn save_as_does_not_need_the_original_to_be_writable() {
     let (dir, inner) = seeded();
     let fail = Rc::new(Cell::new(false));
-    let editor = start(Box::new(Flaky { inner, fail_writes: fail.clone() }));
+    let editor = start(Box::new(Flaky { inner, fail_writes: fail.clone(), fail_creates: Rc::new(Cell::new(false)) }));
     make_dirty(&editor);
     run(&editor, SAVE_AS, "copy", "default");
     assert_eq!(editor.get_current_file().as_str(), "copy.slint");
@@ -341,10 +347,14 @@ fn save_as_does_not_need_the_original_to_be_writable() {
 }
 
 #[test]
-fn save_as_with_failing_write_changes_nothing_in_the_session() {
-    let (_dir, inner) = seeded();
+fn save_as_with_failing_create_changes_nothing_and_leaves_no_file() {
+    let (dir, inner) = seeded();
     let fail = Rc::new(Cell::new(false));
-    let editor = start(Box::new(Flaky { inner, fail_writes: fail.clone() }));
+    let editor = start(Box::new(Flaky {
+        inner,
+        fail_writes: fail.clone(),
+        fail_creates: fail.clone(),
+    }));
     make_dirty(&editor);
     fail.set(true);
     editor.set_file_op(SAVE_AS);
@@ -352,21 +362,58 @@ fn save_as_with_failing_write_changes_nothing_in_the_session() {
     assert!(!editor.get_dialog_error().is_empty());
     assert_eq!(editor.get_current_file().as_str(), "main.slint");
     assert!(editor.get_dirty());
+    assert!(!dir.path().join("default/copy.slint").exists());
+    assert!(!dir.path().join("default/copy.slint.bak").exists());
 }
 
 #[test]
-fn recovery_bookkeeping_follows_the_renamed_file() {
+fn save_as_leaves_no_bak_for_the_new_file() {
     let (dir, store) = seeded();
     let editor = editor_for(store);
-    // A stale-looking draft for the open file is moved along with the file.
-    fresh(&dir).write_recovery("default", "other.slint", "// draft\n").unwrap();
-    editor.invoke_open("default".into(), "other.slint".into());
-    editor.invoke_recovery_answered(true); // restore: dirty with the draft
-    assert!(editor.get_dirty());
+    make_dirty(&editor);
+    run(&editor, SAVE_AS, "copy", "default");
+    assert_eq!(editor.get_current_file().as_str(), "copy.slint");
+    assert!(dir.path().join("default/copy.slint").exists());
+    assert!(!dir.path().join("default/copy.slint.bak").exists());
+}
+
+#[test]
+fn save_as_clears_the_originals_recovery_copy_unconditionally() {
+    use app::glue::startup_target;
+    let (dir, store) = seeded();
+    let editor = editor_for(store);
+    make_dirty(&editor);
+    let s = fresh(&dir);
+    s.write_recovery("default", "main.slint", "// some older draft\n").unwrap();
+    run(&editor, SAVE_AS, "copy", "default");
+    assert_eq!(editor.get_current_file().as_str(), "copy.slint");
+    assert_eq!(s.take_recovery("default", "main.slint").unwrap(), None);
+    assert_ne!(startup_target(&s), Ok(("default".into(), "main.slint".into())));
+    assert_eq!(s.read("default", "main.slint").unwrap(), SRC);
+}
+
+#[test]
+fn rename_of_a_clean_file_moves_its_recovery_copy() {
+    let (dir, store) = seeded();
+    let editor = editor_for(store);
+    assert!(!editor.get_dirty());
+    // A draft of the open (clean) file: no save happens before the rename, so only the
+    // store's rename can carry it over.
+    fresh(&dir).write_recovery("default", "main.slint", "// draft\n").unwrap();
     run(&editor, RENAME_FILE, "moved", "default");
     assert_eq!(editor.get_current_file().as_str(), "moved.slint");
     let s = fresh(&dir);
-    assert_eq!(s.read("default", "moved.slint").unwrap(), "// draft\n");
-    assert_eq!(s.take_recovery("default", "other.slint").unwrap(), None);
-    assert_eq!(s.take_recovery("default", "moved.slint").unwrap(), None, "save cleared it");
+    assert_eq!(s.take_recovery("default", "moved.slint").unwrap().as_deref(), Some("// draft\n"));
+    assert_eq!(s.take_recovery("default", "main.slint").unwrap(), None);
+    assert_eq!(s.read("default", "moved.slint").unwrap(), SRC);
+}
+
+#[test]
+fn rename_of_a_clean_project_moves_its_recovery_copy() {
+    let (dir, store) = seeded();
+    let editor = editor_for(store);
+    fresh(&dir).write_recovery("default", "main.slint", "// draft\n").unwrap();
+    run(&editor, RENAME_PROJECT, "proj2", "default");
+    let s = fresh(&dir);
+    assert_eq!(s.take_recovery("proj2", "main.slint").unwrap().as_deref(), Some("// draft\n"));
 }

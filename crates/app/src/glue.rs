@@ -891,20 +891,12 @@ impl Glue {
             return;
         }
         let text = self.session.doc().text().to_string();
-        let file = match self.store.create_file(project, name) {
+        let file = match self.store.create_file_with(project, name, &text) {
             Ok(f) => f,
             Err(e) => return self.dialog_error(&op_error(&e, name)),
         };
-        if let Err(e) = self.store.write(project, &file, &text) {
-            self.dialog_error(&format!("Save failed: {e}"));
-            return;
-        }
-        // The edits now live in the new file; a draft of exactly this text is redundant.
-        if let Ok(Some(r)) = self.store.take_recovery(&self.project, &self.file)
-            && r == text
-        {
-            let _ = self.store.clear_recovery(&self.project, &self.file);
-        }
+        // The edits now live in the new file; the original's draft must not resurface.
+        let cleared = self.store.clear_recovery(&self.project, &self.file);
         self.document_moved(project, &file);
         self.session.mark_saved();
         self.last_recovery = None;
@@ -912,6 +904,9 @@ impl Glue {
         self.rebuild();
         self.op_done(project);
         self.editor().set_message(format!("Saved as {file}").into());
+        if let Err(e) = cleared {
+            self.set_error(&format!("Recovery copy of the original not removed: {e}"));
+        }
     }
 
     fn select_project(&mut self, name: &str) {
