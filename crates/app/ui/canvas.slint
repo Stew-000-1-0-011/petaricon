@@ -31,6 +31,9 @@ component Dashes inherits Rectangle {
 export component Canvas inherits Rectangle {
     in property <component-factory> factory;
     in property <bool> has-selection;
+    // False for the component root: framed like any selection, but without handles and
+    // dragging inside it pans instead of moving.
+    in property <bool> sel-movable: true;
     // The selection rectangle in design coordinates (unscaled).
     in property <length> sel-x;
     in property <length> sel-y;
@@ -101,7 +104,7 @@ export component Canvas inherits Rectangle {
     // Corner handles win only near a corner; the radius shrinks for small selections so the
     // interior stays draggable. The nearest corner wins.
     function corner-at(px: length, py: length) -> int {
-        if !root.has-selection { return -1; }
+        if !root.has-selection || !root.sel-movable { return -1; }
         // Pick the nearest corner of the selection.
         let r = min(24px, min(root.base-w, root.base-h) / 3);
         let left-d = abs(px - root.base-x);
@@ -116,7 +119,7 @@ export component Canvas inherits Rectangle {
 
     // True when a 44px box centred on (cx, cy) would reach a corner-handle zone.
     function label-blocked(cx: length, cy: length) -> bool {
-        if !root.has-selection { return false; }
+        if !root.has-selection || !root.sel-movable { return false; }
         let r = min(24px, min(root.base-w, root.base-h) / 3) + 22px;
         let dx = min(abs(cx - root.base-x), abs(cx - (root.base-x + root.base-w)));
         let dy = min(abs(cy - root.base-y), abs(cy - (root.base-y + root.base-h)));
@@ -124,7 +127,7 @@ export component Canvas inherits Rectangle {
     }
 
     function inside-selection(px: length, py: length) -> bool {
-        root.has-selection && px >= root.base-x && px <= root.base-x + root.base-w
+        root.has-selection && root.sel-movable && px >= root.base-x && px <= root.base-x + root.base-w
             && py >= root.base-y && py <= root.base-y + root.base-h
     }
 
@@ -156,7 +159,7 @@ export component Canvas inherits Rectangle {
         border-color: #e020e0;
         background: #e020e020;
 
-        for c in [0, 1, 2, 3]: Rectangle {
+        for c in (root.sel-movable ? [0, 1, 2, 3] : []): Rectangle {
             x: (c == 1 || c == 3) ? parent.width - self.width / 2 : -self.width / 2;
             y: (c == 2 || c == 3) ? parent.height - self.height / 2 : -self.height / 2;
             width: 14px;

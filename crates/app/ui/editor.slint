@@ -12,6 +12,7 @@ export component Editor inherits Window {
     in property <component-factory> factory;
     in property <string> error-text;
     in property <bool> has-selection;
+    in property <bool> sel-movable: true;
     // Selection rectangle in design coordinates.
     in property <length> sel-x;
     in property <length> sel-y;
@@ -151,6 +152,7 @@ export component Editor inherits Window {
         height: root.wide ? root.content-h : root.content-h - root.panel-h-eff;
         factory: root.factory;
         has-selection: root.has-selection;
+        sel-movable: root.sel-movable;
         sel-x: root.sel-x;
         sel-y: root.sel-y;
         sel-w: root.sel-w;

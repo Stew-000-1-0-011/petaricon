@@ -162,6 +162,17 @@ fn root_reached_by_tapping_again_cannot_be_moved() {
 }
 
 #[test]
+fn selected_root_has_overlay_geometry() {
+    let mut s = session();
+    s.tap(25., 25.);
+    s.tap(25., 25.);
+    assert_eq!(s.tap(25., 25.), Some(path(&[])));
+    let hit = s.selection_hit().expect("root selection must have geometry for the overlay");
+    assert_eq!((hit.rect.x, hit.rect.y), (0., 0.));
+    assert!(hit.rect.w > 0. && hit.rect.h > 0.);
+}
+
+#[test]
 fn tap_on_empty_area_clears_selection() {
     let mut s = session();
     s.tap(25., 25.);

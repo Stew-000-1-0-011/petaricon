@@ -402,8 +402,12 @@ impl Session {
     }
 
     pub fn selection_hit(&self) -> Option<Hit> {
-        let info = self.snapshot.borrow().element(self.selection.as_ref()?)?;
-        self.live.borrow().as_ref()?.geometry(info.start)
+        self.hit_of(self.selection.as_ref()?)
+    }
+
+    /// Whether the selection can be moved or resized on the canvas (the component root cannot).
+    pub fn selection_movable(&self) -> bool {
+        self.selection.as_ref().is_some_and(|p| !p.indices.is_empty())
     }
 
     /// The selected path and its geometry, refusing the root and layout children.

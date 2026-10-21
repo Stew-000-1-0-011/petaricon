@@ -371,6 +371,7 @@ impl Glue {
                 ed.set_sel_y(hit.rect.y);
                 ed.set_sel_w(hit.rect.w);
                 ed.set_sel_h(hit.rect.h);
+                ed.set_sel_movable(self.session.selection_movable());
                 ed.set_has_selection(true);
             }
             None => ed.set_has_selection(false),
