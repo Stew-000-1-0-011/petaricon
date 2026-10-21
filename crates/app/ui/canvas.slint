@@ -59,10 +59,12 @@ export component Canvas inherits Rectangle {
     in property <int> guides-rev;
     changed guides-rev => { root.editing-prop = ""; }
     callback guide-edited(string /* property */, string /* value */);
-    property <string> editing-prop;
-    property <string> editing-value;
+    in-out property <string> editing-prop;
+    in-out property <string> editing-value;
+    // The window's input bar edits the value instead (the popup would be under the keyboard).
+    in property <bool> popup-hidden;
     property <length> editing-x;
-    property <length> editing-y;
+    in-out property <length> editing-y;
     in-out property <length> pan-x: 8px;
     in-out property <length> pan-y: 8px;
 
@@ -303,6 +305,7 @@ export component Canvas inherits Rectangle {
     }
 
     if root.editing-prop != "": Rectangle {
+        visible: !root.popup-hidden;
         x: root.editing-x;
         y: root.editing-y;
         width: 120px;

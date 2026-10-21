@@ -44,8 +44,12 @@ export component BottomPanel inherits Rectangle {
     in property <[PropItem]> props;
     in property <string> source-title;
     in-out property <string> source-text;
+    // How far the on-screen keyboard reaches into the bottom of this panel.
+    in property <length> kb-overlap;
     callback prop-edited(string, string);
     callback prop-accepted(string, string);
+    // A value field got focus: name, its text, and the window y of the field's bottom edge.
+    callback value-focused(string, string, length);
     callback source-apply(string);
     callback source-edited();
     callback tree-selected(int);
@@ -143,7 +147,7 @@ export component BottomPanel inherits Rectangle {
                 }
             }
             if root.tab == 2: ListView {
-                for p in root.props: Rectangle {
+                for p in root.props: row := Rectangle {
                     height: 44px;
                     Text {
                         x: 8px;
@@ -160,6 +164,11 @@ export component BottomPanel inherits Rectangle {
                         width: parent.width - self.x - 6px;
                         height: 40px;
                         text: p.value;
+                        changed has-focus => {
+                            if self.has-focus {
+                                root.value-focused(p.name, self.text, row.absolute-position.y + row.height);
+                            }
+                        }
                         edited(t) => { root.prop-edited(p.name, t); }
                         accepted(t) => { root.prop-accepted(p.name, t); }
                     }
@@ -167,6 +176,8 @@ export component BottomPanel inherits Rectangle {
             }
             if root.tab == 3: VerticalLayout {
                 padding: 4px;
+                // Only this area shrinks above the keyboard; Apply stays reachable.
+                padding-bottom: 4px + root.kb-overlap;
                 spacing: 4px;
                 Text {
                     text: root.source-title;
@@ -247,6 +258,50 @@ export component FileActions inherits HorizontalLayout {
     ToolButton { text: "Save as…"; horizontal-stretch: 1; clicked => { root.save-as(); } }
 }
 
+// Input bar docked above the on-screen keyboard: label, text field, OK. Every element is 44px high.
+export component KbBar inherits Rectangle {
+    in property <string> label;
+    in-out property <string> text;
+    in property <InputType> input-type: InputType.text;
+    callback edited(string);
+    // OK or Enter.
+    callback accepted(string);
+    height: 52px;
+    background: #2a2e33;
+    // Bumped to pull focus back into the field while the bar stays open.
+    in property <int> focus-rev;
+    changed focus-rev => { edit.focus(); }
+    Rectangle { height: 1px; y: 0px; background: #4fc3f7; }
+    HorizontalLayout {
+        padding: 4px;
+        spacing: 6px;
+        Text {
+            text: root.label;
+            color: #c3cad2;
+            font-size: 13px;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 0;
+            max-width: 110px;
+        }
+        edit := LineEdit {
+            height: 44px;
+            horizontal-stretch: 1;
+            text <=> root.text;
+            input-type: root.input-type;
+            edited(t) => { root.edited(t); }
+            accepted(t) => { root.accepted(t); }
+            init => { self.focus(); }
+        }
+        ToolButton {
+            text: "OK";
+            min-width: 56px;
+            height: 44px;
+            clicked => { root.accepted(root.text); }
+        }
+    }
+}
+
 // A selectable chip, at least 44px tall.
 export component Chip inherits Rectangle {
     in property <string> text;
@@ -269,11 +324,15 @@ export component Chip inherits Rectangle {
 // Dimmed full-window backdrop with a centred card; swallows all taps.
 export component ModalCard inherits Rectangle {
     in property <length> card-width: 360px;
+    // The card is lifted so that it ends above the on-screen keyboard (bottom-limit)
+    // and stays below the top inset (top-limit).
+    in property <length> top-limit: 0px;
+    in property <length> bottom-limit: 100000px;
     background: #000000a0;
     TouchArea { }
     Rectangle {
         x: (parent.width - self.width) / 2;
-        y: min(parent.height * 0.12, 80px);
+        y: max(root.top-limit, min(min(parent.height * 0.12, 80px), root.bottom-limit - self.height - 8px));
         width: min(parent.width - 24px, root.card-width);
         height: inner.preferred-height + 24px;
         background: #2a2e33;
@@ -404,6 +463,8 @@ export component FileOpDialog inherits ModalCard {
     in property <[string]> projects;
     in property <string> initial;
     in property <string> initial-project;
+    // The keyboard is up: the project list shrinks so the card still fits above it.
+    in property <bool> compact;
     callback edited();
     callback run(string /* name */, string /* project */);
     callback close();
@@ -431,7 +492,7 @@ export component FileOpDialog inherits ModalCard {
             init => { self.focus(); }
         }
         if root.mode == 4: ListView {
-            height: 132px;
+            height: root.compact ? 44px : 132px;
             for p in root.projects: Rectangle {
                 height: 44px;
                 background: p == root.target ? #3a4a5c : transparent;

@@ -1055,6 +1055,13 @@ fn commit_when_free(me: Weak<RefCell<Glue>>) {
     }
 }
 
+/// Debug hook: `PETARICON_FAKE_KEYBOARD=<height>` pretends an on-screen keyboard of that many
+/// logical pixels is up, so the input bar can be tried on a desktop.
+fn fake_keyboard_height() -> Option<f32> {
+    let h: f32 = std::env::var("PETARICON_FAKE_KEYBOARD").ok()?.trim().parse().ok()?;
+    (h > 0.0).then_some(h)
+}
+
 fn connect(editor: &Editor, glue: &Shared) {
     macro_rules! on {
         ($setter:ident, |$g:ident $(, $a:ident)*| $body:expr) => {{
@@ -1080,6 +1087,7 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_palette_picked, |g, n| g.palette_picked(&n));
     on!(on_prop_edited, |g, n, v| g.prop_edited(&n, &v));
     on!(on_prop_accepted, |g, n, v| g.prop_accepted(&n, &v));
+    on!(on_prop_flush, |g| g.flush_prop());
     on!(on_source_apply, |g, t| g.source_apply(&t));
     on!(on_source_edited, |g| g.source_dirty = true);
     on!(on_error_tapped, |g| g.error_tapped());
@@ -1129,6 +1137,9 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
         })
     });
     connect(editor, &glue);
+    if let Some(h) = fake_keyboard_height() {
+        editor.set_fake_keyboard(h);
+    }
     {
         let mut g = glue.borrow_mut();
         g.refresh_lists();

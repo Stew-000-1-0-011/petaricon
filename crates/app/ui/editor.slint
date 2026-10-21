@@ -1,6 +1,6 @@
 import { Palette } from "std-widgets.slint";
 import { Canvas, GuideBand } from "canvas.slint";
-import { BottomPanel, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, ExtractDialog, RecoveryDialog, FileActions, FileOpDialog } from "panels.slint";
+import { BottomPanel, KbBar, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, ExtractDialog, RecoveryDialog, FileActions, FileOpDialog } from "panels.slint";
 export { TreeRowItem, PropItem, GuideBand }
 
 export component Editor inherits Window {
@@ -26,6 +26,8 @@ export component Editor inherits Window {
     in property <string> current-component;
     in property <string> message;
     in property <bool> dirty;
+    // Debug: PETARICON_FAKE_KEYBOARD=<height> pretends a keyboard of that height is up.
+    in property <length> fake-keyboard;
     in property <[TreeRowItem]> tree-rows;
     in property <[string]> palette;
     in property <float> zoom-level: 1.0;
@@ -74,6 +76,8 @@ export component Editor inherits Window {
     callback palette-picked(string);
     callback prop-edited(string, string);
     callback prop-accepted(string, string);
+    // The input bar closed because the keyboard went away: apply what was typed.
+    callback prop-flush();
     callback source-apply(string);
     callback source-edited();
     callback error-tapped();
@@ -88,6 +92,37 @@ export component Editor inherits Window {
     callback file-op-run(int /* mode */, string /* name */, string /* project */);
 
     init => { Palette.color-scheme = ColorScheme.dark; }
+
+    // On-screen keyboard (window coordinates); both are 0 on desktop.
+    property <length> kb-h: root.fake-keyboard > 0px ? root.fake-keyboard : root.virtual-keyboard-size.height;
+    property <length> kb-y: root.fake-keyboard > 0px ? root.height - root.fake-keyboard : root.virtual-keyboard-position.y;
+    out property <bool> kb-shown: root.kb-h > 0px;
+    // Input bar above the keyboard, for a Props value or a guide number that the keyboard covers.
+    property <length> bar-h: 52px;
+    property <int> bar-focus-rev;
+    property <string> prop-editing;
+    property <length> prop-bottom;
+    in-out property <string> bar-text;
+    out property <bool> want-prop: root.prop-editing != "" && root.kb-shown && root.prop-bottom > root.kb-y;
+    out property <bool> want-guide: cv.editing-prop != "" && root.kb-shown
+        && root.content-y + cv.editing-y + 44px > root.kb-y;
+    out property <bool> bar-visible: root.want-prop || root.want-guide;
+    changed want-prop => {
+        if !root.want-prop && !root.kb-shown && root.prop-editing != "" {
+            // Keyboard dismissed: what was typed is applied, the edit ends.
+            root.prop-editing = "";
+            root.prop-flush();
+        }
+    }
+    changed want-guide => {
+        if root.want-guide {
+            root.prop-editing = "";
+            root.bar-text = cv.editing-value;
+        } else if !root.kb-shown {
+            cv.editing-prop = "";
+        }
+    }
+    property <length> panel-bottom: root.content-y + root.content-h;
 
     property <bool> menu-open;
     property <bool> wide: root.width > root.height;
@@ -181,12 +216,13 @@ export component Editor inherits Window {
         }
     }
 
-    Canvas {
+    cv := Canvas {
         x: root.inset-left;
         y: root.content-y;
         width: root.wide ? root.content-w - root.panel-w : root.content-w;
         height: root.wide ? root.content-h : root.content-h - root.panel-h-eff;
         factory: root.factory;
+        popup-hidden: root.want-guide;
         has-selection: root.has-selection;
         sel-movable: root.sel-movable;
         sel-x: root.sel-x;
@@ -229,7 +265,14 @@ export component Editor inherits Window {
         props: root.props;
         source-title: root.source-title;
         source-text <=> root.source-text;
+        kb-overlap: root.kb-shown ? max(0px, root.panel-bottom - root.kb-y) : 0px;
         tab <=> root.panel-tab;
+        value-focused(n, t, b) => {
+            root.prop-editing = n;
+            root.prop-bottom = b;
+            root.bar-text = t;
+            root.bar-focus-rev += 1;
+        }
         prop-edited(n, v) => { root.prop-edited(n, v); }
         prop-accepted(n, v) => { root.prop-accepted(n, v); }
         source-apply(t) => { root.source-apply(t); }
@@ -237,6 +280,35 @@ export component Editor inherits Window {
         tree-selected(i) => { root.tree-selected(i); }
         tree-action(a) => { root.tree-action(a); }
         palette-picked(n) => { root.palette-picked(n); }
+    }
+
+    if root.kb-shown && root.fake-keyboard > 0px: Rectangle {
+        x: 0px;
+        y: root.kb-y;
+        width: root.width;
+        height: root.kb-h;
+        background: #555a60;
+        Text { text: "fake keyboard"; color: white; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+    }
+
+    if root.bar-visible: KbBar {
+        focus-rev: root.bar-focus-rev;
+        x: root.inset-left;
+        y: root.kb-y - root.bar-h;
+        width: root.content-w;
+        label: root.want-guide ? cv.editing-prop : root.prop-editing;
+        text <=> root.bar-text;
+        input-type: root.want-guide ? InputType.number : InputType.text;
+        edited(t) => { if !root.want-guide { root.prop-edited(root.prop-editing, t); } }
+        accepted(t) => {
+            if root.want-guide {
+                root.guide-edited(cv.editing-prop, t);
+                cv.editing-prop = "";
+            } else {
+                root.prop-accepted(root.prop-editing, t);
+                root.prop-editing = "";
+            }
+        }
     }
 
     if root.toast-text != "": Rectangle {
@@ -310,6 +382,8 @@ export component Editor inherits Window {
     if root.extract-step != 0: ExtractDialog {
         step: root.extract-step;
         error: root.dialog-error;
+        top-limit: root.inset-top;
+        bottom-limit: root.kb-shown ? root.kb-y : root.height;
         name-changed(st, t) => { root.name-changed(st, t); }
         run(n) => { root.extract-run(n); }
         add(k, t, n) => { root.declaration-add(k, t, n); }
@@ -320,6 +394,9 @@ export component Editor inherits Window {
         mode: root.file-op;
         error: root.dialog-error;
         projects: root.projects;
+        top-limit: root.inset-top;
+        bottom-limit: root.kb-shown ? root.kb-y : root.height;
+        compact: root.kb-shown;
         initial: root.file-op == 2 || root.file-op == 4 ? root.current-file
             : root.file-op == 3 ? root.menu-project : "";
         initial-project: root.file-op == 4 ? root.current-project : root.menu-project;
