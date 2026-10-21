@@ -601,8 +601,7 @@ fn find_repeats(g: &[G], t: f64) -> Vec<Rep> {
 
     // chains
     let mut used = vec![false; vs.len()];
-    let mut chain_of: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut n_chains = 0;
+    let mut groups: Vec<Vec<Vec<usize>>> = Vec::new();
     for s in 0..vs.len() {
         if used[s] {
             continue;
@@ -629,18 +628,41 @@ fn find_repeats(g: &[G], t: f64) -> Vec<Rep> {
                 used[index[&(vs[k].j, vs[k].i)]] = true;
             }
             edges.retain(|k| !used[*k]);
-            for &i in &nodes {
-                chain_of[i].push(n_chains);
-            }
-            n_chains += 1;
             group.push(nodes);
         }
-        if group.is_empty() {
-            continue;
+        if !group.is_empty() {
+            groups.push(group);
         }
+    }
+    // A chain through a subset of a longer chain's elements (every second
+    // element, ...) is implied by the longer one: drop it.
+    let sets: Vec<Vec<usize>> = groups
+        .iter()
+        .flatten()
+        .map(|c| {
+            let mut v = c.clone();
+            v.sort_unstable();
+            v
+        })
+        .collect();
+    let implied = |c: &[usize]| {
+        sets.iter()
+            .any(|o| o.len() > c.len() && c.iter().all(|i| o.contains(i)))
+    };
+    for group in groups.iter_mut() {
+        group.retain(|c| !implied(c));
+    }
+    groups.retain(|gr| !gr.is_empty());
+    let mut chain_of: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut n_chains = 0;
+    for group in groups {
         let mut pairs = Vec::new();
         let (mut sx, mut sy) = (0.0, 0.0);
         for ch in &group {
+            for &i in ch {
+                chain_of[i].push(n_chains);
+            }
+            n_chains += 1;
             for w in ch.windows(2) {
                 pairs.push((w[0], w[1]));
                 sx += g[w[1]][0] - g[w[0]][0];
@@ -724,11 +746,19 @@ fn solve_all(
     found: &Found,
     on: &[Kind],
     keep_orig: bool,
+    cont: [f64; 2],
 ) -> Vec<G> {
     let n = g.len();
     let mut out = g.to_vec();
     for a in AXES {
         let k = ax(a);
+        // An element that lies inside the container stays inside it.
+        let room = |i: usize| -> Option<(f64, f64)> {
+            let (p, sz) = (pos(orig, i, a), size(g, i, a));
+            let hi = (cont[k] - sz).floor();
+            (p >= 0.0 && p + sz <= cont[k] && hi >= 0.0).then_some((0.0, hi))
+        };
+        let mut in_chain = vec![false; n];
         let p0: Vec<f64> = (0..n).map(|i| pos(orig, i, a)).collect();
         let inv = eqs[k].involved(n, on);
         let mut sol = solve_axis(&p0, &eqs[k], on);
@@ -745,7 +775,22 @@ fn solve_all(
                         .map(|(q, &i)| sol[i] - q as f64 * d)
                         .sum::<f64>()
                         / ch.len() as f64;
-                    let base = round_coord(base);
+                    let mut base = round_coord(base);
+                    // shift the whole chain (integer) back into the container
+                    let (mut up, mut down) = (0.0f64, 0.0f64);
+                    for (q, &i) in ch.iter().enumerate() {
+                        if let Some((lo, hi)) = room(i) {
+                            let v = base + q as f64 * d;
+                            up = up.max(lo - v);
+                            down = down.min(hi - v);
+                        }
+                        in_chain[i] = true;
+                    }
+                    if up > 0.0 && down >= 0.0 {
+                        base += up;
+                    } else if down < 0.0 && up <= 0.0 {
+                        base += down;
+                    }
                     for (q, &i) in ch.iter().enumerate() {
                         sol[i] = base + q as f64 * d;
                     }
@@ -767,8 +812,11 @@ fn solve_all(
             }
         }
         for i in 0..n {
-            if keep_orig && inv[i] && (p[i] - p0[i]).abs() < 0.5 {
+            if keep_orig && inv[i] && !in_chain[i] && (p[i] - p0[i]).abs() < 0.5 {
                 p[i] = p0[i];
+            }
+            if let Some((lo, hi)) = room(i).filter(|_| inv[i]) {
+                p[i] = p[i].clamp(lo, hi);
             }
             out[i][pos_ix(a)] = p[i];
         }
@@ -1071,7 +1119,15 @@ pub fn tidy(container_w: f32, container_h: f32, children: &[Child], tolerance: f
         let mut next: Option<Vec<Kind>> = None;
         let mut accepted = None;
         for keep_orig in [true, false] {
-            let sol = solve_all(&orig, &g, &eqs, &found, &on, keep_orig);
+            let sol = solve_all(
+                &orig,
+                &g,
+                &eqs,
+                &found,
+                &on,
+                keep_orig,
+                [container_w as f64, container_h as f64],
+            );
             let moved_ok = (0..n).all(|i| {
                 AXES.iter()
                     .all(|&a| (pos(&sol, i, a) - pos(&orig, i, a)).abs() <= t)

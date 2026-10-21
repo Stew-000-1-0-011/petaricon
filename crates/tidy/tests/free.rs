@@ -547,7 +547,10 @@ fn shuffled_input_gives_identical_output_and_relations_hold() {
         }
     }
     assert_eq!(checked, 720);
-    assert!(chains_seen >= 10, "chain layouts were not exercised: {chains_seen}");
+    assert!(
+        chains_seen >= 10,
+        "chain layouts were not exercised: {chains_seen}"
+    );
 }
 
 #[test]
@@ -750,4 +753,86 @@ fn unrelated_element_next_to_a_chain_is_untouched() {
         }
     );
     assert_relations_hold(&o);
+}
+
+#[test]
+fn long_diagonal_reports_one_repeat_without_stride_two_copies() {
+    let kids = [
+        c(40., 20., 50., 50.),
+        c(145., 205., 50., 50.),
+        c(238., 410., 50., 50.),
+        c(349., 598., 50., 50.),
+        c(436., 805., 50., 50.),
+    ];
+    let o = tidy(1000., 1200., &kids, 16.);
+    let reps = repeats(&o);
+    assert_eq!(reps.len(), 1, "{:?}", o.relations);
+    assert_eq!(reps[0].2, vec![(0, 1), (1, 2), (2, 3), (3, 4)]);
+    assert_relations_hold(&o);
+    assert_moves_within(&o, &kids, 16.);
+}
+
+#[test]
+fn long_vertical_column_reports_one_repeat() {
+    let kids: Vec<Child> = [101., 98., 103., 100., 99.]
+        .iter()
+        .enumerate()
+        .map(|(k, &x)| {
+            c(
+                x,
+                20. + 80. * k as f32 + [0., 3., -2., 4., -3.][k],
+                40.,
+                40.,
+            )
+        })
+        .collect();
+    let o = tidy(800., 800., &kids, 16.);
+    let reps = repeats(&o);
+    assert_eq!(reps.len(), 1, "{:?}", o.relations);
+    assert_eq!(reps[0].2, vec![(0, 1), (1, 2), (2, 3), (3, 4)]);
+    assert!(has_align(
+        &o,
+        Axis::X,
+        Anchor::Start,
+        &[0, 1, 2, 3, 4],
+        100.
+    ));
+    assert_relations_hold(&o);
+}
+
+#[test]
+fn chain_near_the_container_edge_stays_inside() {
+    // the unconstrained fit puts the first element at x = -1
+    let kids = [
+        c(0., 10., 50., 50.),
+        c(98., 200., 50., 50.),
+        c(203., 390., 50., 50.),
+    ];
+    let o = tidy(400., 600., &kids, 16.);
+    for rc in &o.rects {
+        assert!(rc.x >= 0. && rc.y >= 0. && rc.x + rc.w <= 400. && rc.y + rc.h <= 600.);
+    }
+    assert_eq!(repeats(&o).len(), 1, "{:?}", o.relations);
+    assert_relations_hold(&o);
+    assert_moves_within(&o, &kids, 16.);
+}
+
+#[test]
+fn chain_step_is_reported_as_the_exact_integer_step() {
+    // fractional input coordinates
+    let kids = [
+        c(40.3, 20.7, 60., 60.),
+        c(139.9, 240.2, 60., 60.),
+        c(241.6, 461.1, 60., 60.),
+        c(338.2, 683.4, 60., 60.),
+    ];
+    let o = tidy(800., 1200., &kids, 16.);
+    let reps = repeats(&o);
+    assert_eq!(reps.len(), 1, "{:?}", o.relations);
+    let (dx, dy, pairs) = &reps[0];
+    assert_eq!((dx.fract(), dy.fract()), (0., 0.), "{:?}", o.relations);
+    for &(i, j) in pairs {
+        assert_eq!(o.rects[j].x - o.rects[i].x, *dx);
+        assert_eq!(o.rects[j].y - o.rects[i].y, *dy);
+    }
 }
