@@ -77,8 +77,8 @@ export component Editor inherits Window {
     callback source-apply(string);
     callback source-edited();
     callback error-tapped();
-    callback tidy();
-    callback untidy();
+    callback stack();
+    callback unstack();
     callback guide-edited(string, string);
     callback extract-open();
     callback name-changed(int /* step */, string);
@@ -96,7 +96,10 @@ export component Editor inherits Window {
     property <length> inset-left: root.safe-area-insets.left;
     property <length> inset-right: root.safe-area-insets.right;
     property <length> content-w: root.width - root.inset-left - root.inset-right;
-    property <length> toolbar-h: 44px;
+    property <length> row-h: 44px;
+    // Below this width the toolbar needs two rows.
+    property <bool> narrow: root.content-w < 600px;
+    property <length> toolbar-h: root.narrow ? 2 * (root.row-h + 8px) : root.row-h + 8px;
     property <length> band-h: root.error-text != "" ? 44px : root.message != "" ? 30px : 0px;
     property <length> content-y: root.inset-top + root.toolbar-h + root.band-h;
     property <length> content-h: root.height - root.content-y - root.inset-bottom;
@@ -112,18 +115,47 @@ export component Editor inherits Window {
         height: root.toolbar-h;
         background: #2a2e33;
 
-        HorizontalLayout {
-            padding: 4px;
-            spacing: 3px;
-            ToolButton { text: "Undo"; clicked => { root.undo(); } }
-            ToolButton { text: "Redo"; clicked => { root.redo(); } }
-            ToolButton { text: root.dirty ? "Save*" : "Save"; clicked => { root.save(); } }
-            ToolButton { text: "Tidy"; clicked => { root.tidy(); } }
-            ToolButton { text: "Untidy"; clicked => { root.untidy(); } }
-            ToolButton { text: "Extract"; clicked => { root.extract-open(); } }
-            ToolButton { text: "-"; min-width: 32px; clicked => { root.zoom(0.8); } }
-            ToolButton { text: "+"; min-width: 32px; clicked => { root.zoom(1.25); } }
-            ToolButton { text: "File"; clicked => { root.menu-open = true; } }
+        // Row 1 (narrow) or the whole bar (wide).
+        row1 := Flickable {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: root.row-h + 8px;
+            content-width: max(self.width, row1-layout.min-width + 8px);
+            content-height: self.height;
+            row1-layout := HorizontalLayout {
+                x: 0px;
+                width: row1.content-width;
+                padding: 4px;
+                spacing: 3px;
+                ToolButton { text: "≡"; min-width: 44px; clicked => { root.menu-open = true; } }
+                ToolButton { text: "Undo"; clicked => { root.undo(); } }
+                ToolButton { text: "Redo"; clicked => { root.redo(); } }
+                ToolButton { text: root.dirty ? "Save*" : "Save"; min-width: 64px; clicked => { root.save(); } }
+                if !root.narrow: ToolButton { text: "Stack"; min-width: 60px; clicked => { root.stack(); } }
+                if !root.narrow: ToolButton { text: "Unstack"; min-width: 72px; clicked => { root.unstack(); } }
+                if !root.narrow: ToolButton { text: "Extract"; min-width: 68px; clicked => { root.extract-open(); } }
+                ToolButton { text: "−"; clicked => { root.zoom(0.8); } }
+                ToolButton { text: "+"; clicked => { root.zoom(1.25); } }
+            }
+        }
+        // Row 2 (narrow only). A "Tidy" button will go in front of Stack later.
+        if root.narrow: row2 := Flickable {
+            x: 0px;
+            y: root.row-h + 8px;
+            width: parent.width;
+            height: root.row-h + 8px;
+            content-width: max(self.width, row2-layout.min-width + 8px);
+            content-height: self.height;
+            row2-layout := HorizontalLayout {
+                x: 0px;
+                width: row2.content-width;
+                padding: 4px;
+                spacing: 3px;
+                ToolButton { text: "Stack"; min-width: 60px; clicked => { root.stack(); } }
+                ToolButton { text: "Unstack"; min-width: 72px; clicked => { root.unstack(); } }
+                ToolButton { text: "Extract"; min-width: 68px; clicked => { root.extract-open(); } }
+            }
         }
     }
 

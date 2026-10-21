@@ -912,7 +912,7 @@ impl Session {
             let kind = self.doc.element(&Self::child_path(&path, i)).map(|c| c.kind);
             if matches!(kind, Some(ElementKind::Repeated | ElementKind::Conditional)) {
                 return Err(EditError::InvalidTarget(
-                    "cannot tidy a container with for / if children".into(),
+                    "cannot stack a container with for / if children".into(),
                 )
                 .into());
             }

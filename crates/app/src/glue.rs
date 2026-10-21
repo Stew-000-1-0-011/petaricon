@@ -441,7 +441,7 @@ impl Glue {
         });
     }
 
-    fn tidy(&mut self) {
+    fn stack(&mut self) {
         self.flush_prop();
         self.editor().set_message("".into());
         match self.session.tidy_selection() {
@@ -464,7 +464,7 @@ impl Glue {
         }
     }
 
-    fn untidy(&mut self) {
+    fn unstack(&mut self) {
         self.flush_prop();
         self.editor().set_message("".into());
         let r = self.session.untidy_selection();
@@ -1084,8 +1084,8 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_source_edited, |g| g.source_dirty = true);
     on!(on_error_tapped, |g| g.error_tapped());
     on!(on_zoom, |g, m| g.zoom_by(m));
-    on!(on_tidy, |g| g.tidy());
-    on!(on_untidy, |g| g.untidy());
+    on!(on_stack, |g| g.stack());
+    on!(on_unstack, |g| g.unstack());
     on!(on_extract_open, |g| g.extract_open());
     on!(on_name_changed, |g, s, n| g.extract_name_changed(s, &n));
     on!(on_extract_run, |g, n| g.extract_run(&n));
