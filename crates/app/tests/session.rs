@@ -629,7 +629,7 @@ const TWO_KIDS: &str = "        Rectangle { x: 10px; y: 10px; width: 40px; heigh
 #[test]
 fn tidy_wraps_and_selects_layout() {
     let mut s = tidy_session(TWO_KIDS);
-    let w = s.tidy_selection().unwrap();
+    let w = s.stack_selection().unwrap();
     assert!(w.is_empty());
     let t = s.doc().text();
     assert!(t.contains("HorizontalLayout {"), "{t}");
@@ -641,7 +641,7 @@ fn tidy_wraps_and_selects_layout() {
 #[test]
 fn tidy_single_child_is_vertical() {
     let mut s = tidy_session("        Rectangle { x: 10px; y: 10px; width: 40px; height: 30px; }\n");
-    let w = s.tidy_selection().unwrap();
+    let w = s.stack_selection().unwrap();
     assert!(w.is_empty());
     assert!(s.doc().text().contains("VerticalLayout {"));
 }
@@ -650,16 +650,16 @@ fn tidy_single_child_is_vertical() {
 fn tidy_empty_container_is_refused() {
     let mut s = tidy_session("");
     let before = s.doc().text().to_string();
-    assert!(matches!(s.tidy_selection(), Err(SessionError::NotAContainer)));
+    assert!(matches!(s.stack_selection(), Err(SessionError::NotAContainer)));
     assert_eq!(s.doc().text(), before);
 }
 
 #[test]
 fn untidy_restores_visual_positions() {
     let mut s = tidy_session(TWO_KIDS);
-    s.tidy_selection().unwrap();
+    s.stack_selection().unwrap();
     assert!(s.rebuild_standalone(300., 300.));
-    s.untidy_selection().unwrap();
+    s.unstack_selection().unwrap();
     let t = s.doc().text();
     assert!(!t.contains("Layout"), "{t}");
     assert!(t.contains("x: 12px;") && t.contains("y: 12px;"), "{t}");
@@ -670,7 +670,7 @@ fn untidy_restores_visual_positions() {
 #[test]
 fn guides_and_guide_edit() {
     let mut s = tidy_session(TWO_KIDS);
-    s.tidy_selection().unwrap();
+    s.stack_selection().unwrap();
     assert!(s.rebuild_standalone(300., 300.));
     s.select_path(path(&[0]));
     let g = s.guides().expect("guides for the container");
@@ -683,20 +683,20 @@ fn guides_and_guide_edit() {
 #[test]
 fn tidy_untidy_tidy_round_trip_is_stable() {
     let mut s = tidy_session(TWO_KIDS);
-    s.tidy_selection().unwrap();
+    s.stack_selection().unwrap();
     let first = s.doc().text().to_string();
     assert!(s.rebuild_standalone(300., 300.));
-    s.untidy_selection().unwrap();
+    s.unstack_selection().unwrap();
     assert!(s.rebuild_standalone(300., 300.));
     s.select_path(path(&[0]));
-    s.tidy_selection().unwrap();
+    s.stack_selection().unwrap();
     assert_eq!(s.doc().text(), first);
 }
 
 fn assert_tidy_refused(child: &str) {
     let mut s = tidy_session(&format!("{TWO_KIDS}{child}"));
     let before = s.doc().text().to_string();
-    let err = s.tidy_selection().unwrap_err();
+    let err = s.stack_selection().unwrap_err();
     assert!(
         matches!(&err, SessionError::Edit(slint_doc::EditError::InvalidTarget(m)) if m.contains("for / if")),
         "{err:?}"
@@ -718,28 +718,28 @@ fn tidy_refuses_if_children() {
 fn untidy_of_non_layout_is_refused() {
     let mut s = tidy_session(TWO_KIDS);
     let before = s.doc().text().to_string();
-    assert!(matches!(s.untidy_selection(), Err(SessionError::NotALayout)));
+    assert!(matches!(s.unstack_selection(), Err(SessionError::NotALayout)));
     s.select_path(path(&[0, 0]));
-    assert!(matches!(s.untidy_selection(), Err(SessionError::NotALayout)));
+    assert!(matches!(s.unstack_selection(), Err(SessionError::NotALayout)));
     assert_eq!(s.doc().text(), before);
 }
 
 #[test]
 fn guides_and_untidy_agree_on_the_layout() {
     let mut s = tidy_session(TWO_KIDS);
-    s.tidy_selection().unwrap();
+    s.stack_selection().unwrap();
     assert!(s.rebuild_standalone(300., 300.));
     s.select_path(path(&[0]));
     assert_eq!(s.guide_layout_path(), Some(path(&[0, 0])));
     assert!(s.guides().is_some());
-    s.untidy_selection().unwrap();
+    s.unstack_selection().unwrap();
     assert!(!s.doc().text().contains("Layout"));
 }
 
 #[test]
 fn failed_guide_edit_keeps_selection() {
     let mut s = tidy_session(TWO_KIDS);
-    s.tidy_selection().unwrap();
+    s.stack_selection().unwrap();
     assert!(s.rebuild_standalone(300., 300.));
     s.select_path(path(&[0]));
     // No layout under this selection: the edit fails and the selection stays.
@@ -865,8 +865,8 @@ fn source_edit_adding_a_broken_sibling_does_not_retarget_edits() {
     ));
     assert!(matches!(s.set_property("x", "30"), Err(SessionError::Compile(_))));
     assert!(matches!(s.set_guide_property("spacing", "4"), Err(SessionError::Compile(_))));
-    assert!(matches!(s.untidy_selection(), Err(SessionError::Compile(_))));
-    assert!(matches!(s.tidy_selection(), Err(SessionError::Compile(_))));
+    assert!(matches!(s.unstack_selection(), Err(SessionError::Compile(_))));
+    assert!(matches!(s.stack_selection(), Err(SessionError::Compile(_))));
     assert_eq!(s.doc().text(), edited);
 }
 

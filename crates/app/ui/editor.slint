@@ -1,7 +1,7 @@
 import { Palette } from "std-widgets.slint";
-import { Canvas, GuideBand } from "canvas.slint";
-import { BottomPanel, KbBar, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, ExtractDialog, RecoveryDialog, FileActions, FileOpDialog } from "panels.slint";
-export { TreeRowItem, PropItem, GuideBand }
+import { Canvas, GuideBand, TidyMark } from "canvas.slint";
+import { BottomPanel, KbBar, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, ExtractDialog, RecoveryDialog, FileActions, FileOpDialog, SettingsSection } from "panels.slint";
+export { TreeRowItem, PropItem, GuideBand, TidyMark }
 
 export component Editor inherits Window {
     title: "Petaricon Editor";
@@ -55,6 +55,9 @@ export component Editor inherits Window {
     in property <length> a-w;
     in property <length> a-h;
     in property <string> toast-text;
+    in property <[TidyMark]> tidy-marks;
+    // Tolerance of Tidy in px (4..48, set in the menu).
+    in property <int> tidy-tolerance: 16;
     in property <int> guides-rev;
     in-out property <int> extract-step;
     in-out property <string> dialog-error;
@@ -85,6 +88,10 @@ export component Editor inherits Window {
     callback source-apply(string);
     callback source-edited();
     callback error-tapped();
+    callback tidy();
+    callback tolerance-step(int /* -1 or +1 */);
+    // The bottom panel tab changed: the Tidy overlay goes away.
+    callback overlay-clear();
     callback stack();
     callback unstack();
     callback guide-edited(string, string);
@@ -169,7 +176,7 @@ export component Editor inherits Window {
         }
     }
     changed props-rev => { root.prop-editing = ""; }
-    changed panel-tab => { root.close-prop-bar(); }
+    changed panel-tab => { root.close-prop-bar(); root.overlay-clear(); }
     changed want-guide => {
         if root.want-guide {
             root.close-prop-bar();
@@ -242,6 +249,7 @@ export component Editor inherits Window {
                 ToolButton { text: "Undo"; clicked => { root.undo(); } }
                 ToolButton { text: "Redo"; clicked => { root.redo(); } }
                 ToolButton { text: root.dirty ? "Save*" : "Save"; min-width: 64px; clicked => { root.save(); } }
+                if !root.narrow: ToolButton { text: "Tidy"; min-width: 56px; clicked => { root.tidy(); } }
                 if !root.narrow: ToolButton { text: "Stack"; min-width: 60px; clicked => { root.stack(); } }
                 if !root.narrow: ToolButton { text: "Unstack"; min-width: 72px; clicked => { root.unstack(); } }
                 if !root.narrow: ToolButton { text: "Extract"; min-width: 68px; clicked => { root.extract-open(); } }
@@ -249,7 +257,7 @@ export component Editor inherits Window {
                 ToolButton { text: "+"; clicked => { root.zoom(1.25); } }
             }
         }
-        // Row 2 (narrow only). A "Tidy" button will go in front of Stack later.
+        // Row 2 (narrow only).
         if root.narrow: row2 := Flickable {
             x: 0px;
             y: root.row-h + 8px;
@@ -262,6 +270,7 @@ export component Editor inherits Window {
                 width: row2.content-width;
                 padding: 4px;
                 spacing: 3px;
+                ToolButton { text: "Tidy"; min-width: 56px; clicked => { root.tidy(); } }
                 ToolButton { text: "Stack"; min-width: 60px; clicked => { root.stack(); } }
                 ToolButton { text: "Unstack"; min-width: 72px; clicked => { root.unstack(); } }
                 ToolButton { text: "Extract"; min-width: 68px; clicked => { root.extract-open(); } }
@@ -317,6 +326,7 @@ export component Editor inherits Window {
         g-vertical: root.g-vertical;
         bands: root.bands;
         has-align: root.has-align;
+        tidy-marks: root.tidy-marks;
         a-x: root.a-x;
         a-y: root.a-y;
         a-w: root.a-w;
@@ -432,7 +442,7 @@ export component Editor inherits Window {
             x: (parent.width - self.width) / 2;
             y: root.inset-top + 8px;
             width: min(parent.width - 24px, 420px);
-            height: min(parent.height - root.inset-top - root.inset-bottom - 16px, 560px);
+            height: min(parent.height - root.inset-top - root.inset-bottom - 16px, 640px);
             background: #2a2e33;
             border-radius: 8px;
             // Swallow taps that land on the menu itself.
@@ -467,6 +477,10 @@ export component Editor inherits Window {
                     items: root.components;
                     current: root.current-component;
                     picked(c) => { root.menu-open = false; root.choose-component(c); }
+                }
+                SettingsSection {
+                    tolerance: root.tidy-tolerance;
+                    step(d) => { root.tolerance-step(d); }
                 }
                 ToolButton { text: "Close"; height: 44px; clicked => { root.menu-open = false; } }
             }

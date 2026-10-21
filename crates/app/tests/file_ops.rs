@@ -311,6 +311,8 @@ impl ProjectStore for Flaky {
     fn clear_recovery(&self, p: &str, f: &str) -> io::Result<()> { self.inner.clear_recovery(p, f) }
     fn last_open(&self) -> io::Result<Option<(String, String)>> { self.inner.last_open() }
     fn set_last_open(&self, p: &str, f: &str) -> io::Result<()> { self.inner.set_last_open(p, f) }
+    fn setting(&self, k: &str) -> Option<String> { self.inner.setting(k) }
+    fn set_setting(&self, k: &str, v: &str) -> io::Result<()> { self.inner.set_setting(k, v) }
 }
 
 #[test]

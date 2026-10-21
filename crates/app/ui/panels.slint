@@ -298,6 +298,35 @@ export component FileActions inherits HorizontalLayout {
     ToolButton { text: "Save as..."; horizontal-stretch: 1; clicked => { root.save-as(); } }
 }
 
+// Menu section "Settings": the tolerance of Tidy with - / value / + (the glue steps it by 4px).
+export component SettingsSection inherits VerticalLayout {
+    in property <int> tolerance;
+    callback step(int);
+    spacing: 2px;
+    Text { text: "Settings"; color: #9aa3ad; font-size: 12px; }
+    HorizontalLayout {
+        height: 44px;
+        spacing: 6px;
+        Text {
+            text: "Tidy tolerance";
+            color: white;
+            font-size: 14px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        ToolButton { text: "-"; min-width: 44px; clicked => { root.step(-1); } }
+        Text {
+            text: "\{root.tolerance}px";
+            color: white;
+            font-size: 14px;
+            min-width: 44px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        ToolButton { text: "+"; min-width: 44px; clicked => { root.step(1); } }
+    }
+}
+
 // Input bar docked above the on-screen keyboard: label, text field, OK. Every element is 44px high.
 export component KbBar inherits Rectangle {
     in property <string> label;

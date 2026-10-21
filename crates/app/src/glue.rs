@@ -9,8 +9,9 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use slint_doc::Document;
 use storage::ProjectStore;
 
-use crate::session::{Corner, Session, TreeAction, TreeRow};
-use crate::{Editor, GuideBand, PropItem, TreeRowItem};
+use crate::session::{Corner, Session, TidyReport, TreeAction, TreeRow};
+use crate::tidy_overlay::{self, MarkKind};
+use crate::{Editor, GuideBand, PropItem, TidyMark, TreeRowItem};
 
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 4.0;
@@ -19,6 +20,11 @@ const DEFAULT_FILE: &str = "main.slint";
 const PROP_DEBOUNCE: Duration = Duration::from_millis(300);
 const SOURCE_TAB: i32 = 3;
 const RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
+const TIDY_TOLERANCE_KEY: &str = "tidy_tolerance";
+pub const TIDY_TOLERANCE_DEFAULT: i32 = 16;
+pub const TIDY_TOLERANCE_MIN: i32 = 4;
+pub const TIDY_TOLERANCE_MAX: i32 = 48;
+pub const TIDY_TOLERANCE_STEP: i32 = 4;
 const TOAST_TIME: Duration = Duration::from_secs(3);
 
 thread_local! {
@@ -181,6 +187,14 @@ pub fn pending_recovery(
     }
 }
 
+/// The tolerance stored in the settings file, else the default; always within 4..=48.
+pub fn stored_tolerance(store: &dyn ProjectStore) -> i32 {
+    store
+        .setting(TIDY_TOLERANCE_KEY)
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .map_or(TIDY_TOLERANCE_DEFAULT, |v| v.clamp(TIDY_TOLERANCE_MIN, TIDY_TOLERANCE_MAX))
+}
+
 pub struct Glue {
     editor: slint::Weak<Editor>,
     store: Box<dyn ProjectStore>,
@@ -210,6 +224,10 @@ pub struct Glue {
     /// Name of the component just extracted; declarations are added to it.
     extracted: String,
     guide_target: RefCell<Option<slint_doc::ElementPath>>,
+    /// Tolerance of Tidy in px.
+    tolerance: i32,
+    /// The last Tidy, drawn over the canvas until the next edit or selection change.
+    tidy_report: Option<TidyReport>,
 }
 
 /// A property edit with the element and document it was typed for.
@@ -379,6 +397,74 @@ impl Glue {
             None => ed.set_has_selection(false),
         }
         self.update_guides();
+        self.update_tidy_marks();
+    }
+
+    fn update_tidy_marks(&self) {
+        let marks = self
+            .tidy_report
+            .as_ref()
+            .and_then(|r| {
+                let (origin, rects) = self.session.tidy_geometry(&r.container, &r.children)?;
+                Some(tidy_overlay::marks(&r.relations, origin, &rects))
+            })
+            .unwrap_or_default();
+        let items: Vec<TidyMark> = marks
+            .into_iter()
+            .map(|m| TidyMark {
+                kind: match m.kind {
+                    MarkKind::HLine => 0,
+                    MarkKind::VLine => 1,
+                    MarkKind::Marker => 2,
+                    MarkKind::Dot => 3,
+                },
+                x: m.x,
+                y: m.y,
+                w: m.w,
+                h: m.h,
+            })
+            .collect();
+        self.editor().set_tidy_marks(ModelRc::new(VecModel::from(items)));
+    }
+
+    /// Removes the Tidy overlay (any edit, selection change, tab change, undo or redo).
+    fn clear_tidy(&mut self) {
+        if self.tidy_report.take().is_some() {
+            self.update_tidy_marks();
+        }
+    }
+
+    fn tidy(&mut self) {
+        self.flush_prop();
+        self.editor().set_message("".into());
+        match self.session.tidy_free_selection(self.tolerance as f32) {
+            Ok(report) => {
+                if report.changed > 0 {
+                    self.rebuild();
+                    let text = report.summary();
+                    self.tidy_report = Some(report);
+                    self.update_overlay();
+                    self.toast(&text);
+                } else {
+                    self.clear_tidy();
+                    self.toast(&report.summary());
+                }
+            }
+            Err(e) => self.set_error(&e.to_string()),
+        }
+    }
+
+    fn tolerance_step(&mut self, dir: i32) {
+        let t = (self.tolerance + dir.signum() * TIDY_TOLERANCE_STEP)
+            .clamp(TIDY_TOLERANCE_MIN, TIDY_TOLERANCE_MAX);
+        if t == self.tolerance {
+            return;
+        }
+        self.tolerance = t;
+        self.editor().set_tidy_tolerance(t);
+        if let Err(e) = self.store.set_setting(TIDY_TOLERANCE_KEY, &t.to_string()) {
+            self.set_error(&format!("Settings not saved: {e}"));
+        }
     }
 
     fn update_guides(&self) {
@@ -446,7 +532,7 @@ impl Glue {
     fn stack(&mut self) {
         self.flush_prop();
         self.editor().set_message("".into());
-        match self.session.tidy_selection() {
+        match self.session.stack_selection() {
             Ok(warnings) => {
                 self.rebuild();
                 if !warnings.is_empty() {
@@ -469,7 +555,7 @@ impl Glue {
     fn unstack(&mut self) {
         self.flush_prop();
         self.editor().set_message("".into());
-        let r = self.session.untidy_selection();
+        let r = self.session.unstack_selection();
         self.after_edit(r);
     }
 
@@ -487,6 +573,7 @@ impl Glue {
     }
 
     fn rebuild_with(&mut self, props: bool, source: bool) {
+        self.clear_tidy();
         let factory = self.session.rebuild();
         let ed = self.editor();
         match factory {
@@ -571,6 +658,7 @@ impl Glue {
 
     fn tree_selected(&mut self, row: i32) {
         self.flush_prop();
+        self.clear_tidy();
         self.discard_source_edits();
         self.editor().set_message("".into());
         if let Some(r) = self.session.tree_rows().into_iter().nth(row as usize) {
@@ -612,6 +700,7 @@ impl Glue {
 
     fn tapped(&mut self, x: f32, y: f32) {
         self.flush_prop();
+        self.clear_tidy();
         self.discard_source_edits();
         self.editor().set_message("".into());
         self.session.tap(x / self.zoom, y / self.zoom);
@@ -637,6 +726,7 @@ impl Glue {
 
     fn history(&mut self, undo: bool) {
         self.flush_prop();
+        self.clear_tidy();
         self.discard_source_edits();
         self.editor().set_message("".into());
         let changed = if undo { self.session.undo() } else { self.session.redo() };
@@ -1095,6 +1185,9 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_source_edited, |g| g.source_dirty = true);
     on!(on_error_tapped, |g| g.error_tapped());
     on!(on_zoom, |g, m| g.zoom_by(m));
+    on!(on_tidy, |g| g.tidy());
+    on!(on_tolerance_step, |g, d| g.tolerance_step(d));
+    on!(on_overlay_clear, |g| g.clear_tidy());
     on!(on_stack, |g| g.stack());
     on!(on_unstack, |g| g.unstack());
     on!(on_extract_open, |g| g.extract_open());
@@ -1109,6 +1202,8 @@ fn connect(editor: &Editor, glue: &Shared) {
 pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint::PlatformError> {
     let (project, file) = startup_target(&*store).map_err(platform_err)?;
 
+    let tolerance = stored_tolerance(&*store);
+    editor.set_tidy_tolerance(tolerance);
     let mut load_error = None;
     let glue: Shared = Rc::new_cyclic(|me| {
         let loaded = Glue::load(&*store, me, &project, &file);
@@ -1137,6 +1232,8 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
             recovered: None,
             extracted: String::new(),
             guide_target: RefCell::new(None),
+            tolerance,
+            tidy_report: None,
         })
     });
     connect(editor, &glue);

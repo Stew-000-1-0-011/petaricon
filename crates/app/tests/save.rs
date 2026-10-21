@@ -79,6 +79,8 @@ impl ProjectStore for Flaky {
     fn write_recovery(&self, p: &str, f: &str, t: &str) -> io::Result<()> { self.inner.write_recovery(p, f, t) }
     fn take_recovery(&self, p: &str, f: &str) -> io::Result<Option<String>> { self.inner.take_recovery(p, f) }
     fn clear_recovery(&self, p: &str, f: &str) -> io::Result<()> { self.inner.clear_recovery(p, f) }
+    fn setting(&self, k: &str) -> Option<String> { self.inner.setting(k) }
+    fn set_setting(&self, k: &str, v: &str) -> io::Result<()> { self.inner.set_setting(k, v) }
 }
 
 #[test]

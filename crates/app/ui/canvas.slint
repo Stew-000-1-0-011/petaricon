@@ -14,6 +14,17 @@ export struct GuideBand {
     is-gap: bool,
 }
 
+// One mark of the free Tidy overlay, in design coordinates. kind: 0 horizontal dashed line of
+// length w, 1 vertical dashed line of length h, 2 small square marker centred on (x, y),
+// 3 dot centred on (x, y).
+export struct TidyMark {
+    kind: int,
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+}
+
 // A dashed horizontal / vertical line: 6px segments with 4px gaps.
 component Dashes inherits Rectangle {
     in property <length> len;
@@ -55,6 +66,7 @@ export component Canvas inherits Rectangle {
     in property <length> a-y;
     in property <length> a-w;
     in property <length> a-h;
+    in property <[TidyMark]> tidy-marks;
     // Bumped by the glue whenever the guided layout changes; closes the edit popup.
     in property <int> guides-rev;
     changed guides-rev => { root.editing-prop = ""; }
@@ -332,6 +344,30 @@ export component Canvas inherits Rectangle {
                 root.guide-edited(root.editing-prop, t);
                 root.editing-prop = "";
             }
+        }
+    }
+
+    for m in root.tidy-marks: Rectangle {
+        x: root.pan-x + m.x * root.zoom;
+        y: root.pan-y + m.y * root.zoom;
+        if m.kind == 0: Dashes { x: 0px; y: -1px; len: m.w * root.zoom; stroke: #00e5a0; }
+        if m.kind == 1: Dashes { x: -1px; y: 0px; len: m.h * root.zoom; vertical: true; stroke: #00e5a0; }
+        if m.kind == 2: Rectangle {
+            x: -4px;
+            y: -4px;
+            width: 8px;
+            height: 8px;
+            background: #00e5a0;
+            border-width: 1px;
+            border-color: #0b3d2e;
+        }
+        if m.kind == 3: Rectangle {
+            x: -2px;
+            y: -2px;
+            width: 4px;
+            height: 4px;
+            border-radius: 2px;
+            background: #00e5a0;
         }
     }
 }

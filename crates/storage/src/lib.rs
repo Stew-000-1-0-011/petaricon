@@ -13,6 +13,25 @@ const MAIN_TEMPLATE: &str = "export component Main inherits Window {\n    prefer
 /// listed as projects).
 const LAST_OPEN: &str = ".last-open";
 
+/// Small `key=value` settings of the editor; lives in the store root.
+const SETTINGS: &str = ".settings";
+
+/// The only keys `setting` / `set_setting` accept.
+pub const SETTING_KEYS: [&str; 1] = ["tidy_tolerance"];
+
+fn check_setting(key: &str, value: Option<&str>) -> io::Result<()> {
+    let bad = |what: String| io::Error::new(io::ErrorKind::InvalidInput, what);
+    if !SETTING_KEYS.contains(&key) {
+        return Err(bad(format!("unknown setting: {key:?}")));
+    }
+    if let Some(v) = value
+        && (v.contains(['\n', '\r', '\0']) || v.trim() != v)
+    {
+        return Err(bad(format!("invalid value for {key}: {v:?}")));
+    }
+    Ok(())
+}
+
 pub trait ProjectStore {
     fn projects(&self) -> io::Result<Vec<String>>;
     fn create_project(&self, name: &str) -> io::Result<()>;
@@ -42,6 +61,14 @@ pub trait ProjectStore {
     }
     fn set_last_open(&self, _project: &str, _file: &str) -> io::Result<()> {
         Ok(())
+    }
+    /// The stored value of a setting (`None` when never set, unknown or unreadable).
+    fn setting(&self, _key: &str) -> Option<String> {
+        None
+    }
+    /// Stores a setting; other settings are kept. Only keys in `SETTING_KEYS` are accepted.
+    fn set_setting(&self, key: &str, value: &str) -> io::Result<()> {
+        check_setting(key, Some(value))
     }
 }
 
@@ -283,6 +310,34 @@ impl ProjectStore for LocalStore {
         check_name(file)?;
         fs::write(self.root.join(LAST_OPEN), format!("{project}\n{file}\n"))
     }
+
+    fn setting(&self, key: &str) -> Option<String> {
+        check_setting(key, None).ok()?;
+        let text = fs::read_to_string(self.root.join(SETTINGS)).ok()?;
+        text.lines().find_map(|l| {
+            let (k, v) = l.split_once('=')?;
+            (k == key).then(|| v.to_string())
+        })
+    }
+
+    fn set_setting(&self, key: &str, value: &str) -> io::Result<()> {
+        check_setting(key, Some(value))?;
+        let path = self.root.join(SETTINGS);
+        let old = match fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
+        let mut out: Vec<String> = old
+            .lines()
+            .filter(|l| l.split_once('=').is_some_and(|(k, _)| k != key && SETTING_KEYS.contains(&k)))
+            .map(str::to_string)
+            .collect();
+        out.push(format!("{key}={value}"));
+        let tmp = self.root.join(".settings.tmp");
+        fs::write(&tmp, out.join("\n") + "\n")?;
+        fs::rename(&tmp, &path)
+    }
 }
 
 #[cfg(test)]
@@ -362,6 +417,29 @@ mod tests {
         assert!(s.set_last_open("../x", "main.slint").is_err());
         std::fs::write(d.path().join("projects/.last-open"), "../evil\nx\n").unwrap();
         assert_eq!(s.last_open().unwrap(), None);
+    }
+
+    #[test]
+    fn settings_roundtrip_and_validation() {
+        let (d, s) = store();
+        assert_eq!(s.setting("tidy_tolerance"), None);
+        s.set_setting("tidy_tolerance", "20").unwrap();
+        assert_eq!(s.setting("tidy_tolerance").as_deref(), Some("20"));
+        s.set_setting("tidy_tolerance", "8").unwrap();
+        let text = std::fs::read_to_string(d.path().join("projects/.settings")).unwrap();
+        assert_eq!(text, "tidy_tolerance=8\n");
+        // survives reopening the store
+        let again = LocalStore::new(d.path().join("projects")).unwrap();
+        assert_eq!(again.setting("tidy_tolerance").as_deref(), Some("8"));
+        for bad in ["../x", "a=b", "", "other", ".settings"] {
+            assert_eq!(s.set_setting(bad, "1").unwrap_err().kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+            assert_eq!(s.setting(bad), None);
+        }
+        for v in ["1\n2", "x\ry", " 3"] {
+            assert_eq!(s.set_setting("tidy_tolerance", v).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        }
+        assert_eq!(s.setting("tidy_tolerance").as_deref(), Some("8"));
+        assert!(s.projects().unwrap().is_empty());
     }
 
     #[test]

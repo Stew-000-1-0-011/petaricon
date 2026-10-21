@@ -26,6 +26,10 @@ pub enum SessionError {
     NotAContainer,
     #[error("the element is not a layout")]
     NotALayout,
+    #[error("the selection is a layout; use Unstack to free its children first")]
+    TidyOnLayout,
+    #[error("the container has no children to tidy")]
+    NoChildren,
     #[error("the element has no geometry in the preview")]
     NoGeometry,
     #[error("compile failed")]
@@ -203,6 +207,38 @@ pub fn declaration_text(kind: DeclKind, ty: &str, name: &str) -> String {
         DeclKind::InOutProperty => format!("in-out property <{ty}> {name};"),
         DeclKind::OutProperty => format!("out property <{ty}> {name};"),
         DeclKind::Callback => format!("callback {name}();"),
+    }
+}
+
+/// What a free Tidy did: the relations it found (member indices refer to `children`) and how
+/// many children were rewritten.
+#[derive(Debug, Clone)]
+pub struct TidyReport {
+    pub relations: Vec<tidy::free::Relation>,
+    pub changed: usize,
+    pub container: ElementPath,
+    /// Path of every child, in the order the relations index them.
+    pub children: Vec<ElementPath>,
+}
+
+impl TidyReport {
+    /// One line for the toast, e.g. `そろえ 3・等間隔 1`; kinds that did not occur are omitted.
+    pub fn summary(&self) -> String {
+        use tidy::free::Relation as R;
+        if self.changed == 0 {
+            return "整える箇所はありませんでした".into();
+        }
+        let count = |f: fn(&R) -> bool| self.relations.iter().filter(|r| f(r)).count();
+        let parts = [
+            ("そろえ", count(|r| matches!(r, R::Align { .. }))),
+            ("等間隔", count(|r| matches!(r, R::EqualGap { .. }))),
+            ("対称", count(|r| matches!(r, R::Symmetric { .. }))),
+            ("繰り返し", count(|r| matches!(r, R::Repeat { .. }))),
+            ("寸法", count(|r| matches!(r, R::SameSize { .. }))),
+        ];
+        let text: Vec<String> =
+            parts.iter().filter(|(_, n)| *n > 0).map(|(k, n)| format!("{k} {n}")).collect();
+        if text.is_empty() { format!("{} 件を整えました", self.changed) } else { text.join("・") }
     }
 }
 
@@ -898,7 +934,7 @@ impl Session {
 
     /// Wraps the children of the selected container in an inferred layout and selects it.
     /// The positions come from the live preview; nothing changes when any is missing.
-    pub fn tidy_selection(&mut self) -> Result<Vec<tidy::Warning>, SessionError> {
+    pub fn stack_selection(&mut self) -> Result<Vec<tidy::Warning>, SessionError> {
         let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
         self.refuse_if_mismatch()?;
         let info = self
@@ -926,6 +962,105 @@ impl Session {
             .ok_or(SessionError::NotAContainer)?;
         self.apply(Op::WrapInLayout { container: path, layout: layout_spec(&plan) })?;
         Ok(plan.warnings)
+    }
+
+    /// Nudges the direct children of the selected container (free placement, no layout) onto
+    /// intended values; see `tidy::free`. Rewrites `x` / `y` and explicit `width` / `height`
+    /// as integer `px`, all as one history step. The selection stays on the container.
+    pub fn tidy_free_selection(&mut self, tolerance: f32) -> Result<TidyReport, SessionError> {
+        let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
+        self.refuse_if_stale()?;
+        let info = self
+            .doc
+            .element(&path)
+            .ok_or_else(|| EditError::ElementNotFound(path.clone()))?;
+        if matches!(info.kind, ElementKind::Layout(_)) {
+            return Err(SessionError::TidyOnLayout);
+        }
+        if !Self::is_container(&info) {
+            return Err(SessionError::NotAContainer);
+        }
+        let mut infos = Vec::new();
+        for i in 0..info.child_count {
+            let ci = self
+                .doc
+                .element(&Self::child_path(&path, i))
+                .ok_or_else(|| EditError::ElementNotFound(Self::child_path(&path, i)))?;
+            if matches!(ci.kind, ElementKind::Repeated | ElementKind::Conditional) {
+                return Err(EditError::InvalidTarget(
+                    "cannot tidy a container with for / if children".into(),
+                )
+                .into());
+            }
+            infos.push(ci);
+        }
+        if infos.is_empty() {
+            return Err(SessionError::NoChildren);
+        }
+        let container = self.hit_of(&path).ok_or(SessionError::NoGeometry)?;
+        let children = infos
+            .iter()
+            .map(|ci| {
+                let local = self.hit_of(&ci.path)?.local;
+                let has = |n: &str| ci.bindings.iter().any(|b| b.name == n);
+                Some(tidy::free::Child {
+                    rect: local,
+                    w_explicit: has("width"),
+                    h_explicit: has("height"),
+                })
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or(SessionError::NoGeometry)?;
+        let out = tidy::free::tidy(container.local.w, container.local.h, &children, tolerance);
+
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        let mut scratch = self.snapshot_doc();
+        let mut changed = 0;
+        for ((ci, old), new) in infos.iter().zip(&children).zip(&out.rects) {
+            let mut bindings = Vec::new();
+            let mut set = |name: &str, v: f32| bindings.push((name.to_string(), Some(format!("{}px", v.round() as i32))));
+            if !near(old.rect.x, new.x) {
+                set("x", new.x);
+            }
+            if !near(old.rect.y, new.y) {
+                set("y", new.y);
+            }
+            if old.w_explicit && !near(old.rect.w, new.w) {
+                set("width", new.w);
+            }
+            if old.h_explicit && !near(old.rect.h, new.h) {
+                set("height", new.h);
+            }
+            if bindings.is_empty() {
+                continue;
+            }
+            changed += 1;
+            scratch.apply(Op::SetBindings { path: ci.path.clone(), bindings })?;
+        }
+        if changed > 0 {
+            self.doc.replace_text(scratch.text().to_string());
+        }
+        Ok(TidyReport {
+            relations: out.relations,
+            changed,
+            container: path,
+            children: infos.into_iter().map(|c| c.path).collect(),
+        })
+    }
+
+    /// Absolute (design area) origin of `container` and rectangles of `children`, from the
+    /// current preview. `None` when any is missing.
+    pub fn tidy_geometry(
+        &self,
+        container: &ElementPath,
+        children: &[ElementPath],
+    ) -> Option<((f32, f32), Vec<tidy::Rect>)> {
+        let c = self.hit_of(container)?.rect;
+        let rects = children
+            .iter()
+            .map(|p| self.hit_of(p).map(|h| h.rect))
+            .collect::<Option<Vec<_>>>()?;
+        Some(((c.x, c.y), rects))
     }
 
     /// The one layout that guides and untidy act on: the selection when it is a horizontal or
@@ -963,7 +1098,7 @@ impl Session {
 
     /// Replaces the layout found by the same rule as the guides by its children, keeping
     /// their on-screen positions rounded to the grid. `NotALayout` when there is none.
-    pub fn untidy_selection(&mut self) -> Result<(), SessionError> {
+    pub fn unstack_selection(&mut self) -> Result<(), SessionError> {
         self.selection.as_ref().ok_or(SessionError::NoSelection)?;
         self.refuse_if_mismatch()?;
         let (layout, layout_info, _) = self.guide_layout().ok_or(SessionError::NotALayout)?;
