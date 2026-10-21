@@ -844,7 +844,7 @@ impl Session {
     }
 
     /// Adds a part: into the selection when it is a container, else into its parent (the
-    /// component root when nothing is selected).
+    /// component root when nothing is selected). The receiving container is selected afterwards.
     ///
     /// `hint` is the top-left of the visible design area, where the part is preferably placed.
     pub fn add_from_palette(
@@ -869,7 +869,11 @@ impl Session {
                 }
             }
         };
-        self.insert_part(target, name, hint)
+        self.insert_part(target.clone(), name, hint)?;
+        // Keep the receiving container selected: repeated adds become siblings instead of
+        // nesting into the part just added (Rectangle counts as a container).
+        self.selection = Some(target);
+        Ok(())
     }
 
     fn child_path(parent: &ElementPath, i: usize) -> ElementPath {

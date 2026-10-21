@@ -304,7 +304,8 @@ fn palette_adds_into_free_container_without_overlap() {
     assert_eq!(el.type_name, "Button");
     assert_eq!(b("x").as_deref(), Some("56px"));
     assert_eq!(b("y").as_deref(), Some("8px"));
-    assert_eq!(s.selection(), Some(&path(&[0, 1])));
+    // The container stays selected so the next part lands next to this one.
+    assert_eq!(s.selection(), Some(&path(&[0])));
     // One undo step removes both the element and the import.
     assert!(s.undo());
     assert_eq!(s.doc().text(), PALETTE_SRC);
@@ -331,10 +332,26 @@ fn palette_into_non_container_goes_to_parent_and_layout_has_no_xy() {
     let mut s = palette_session(PALETTE_SRC);
     select(&mut s, &[1, 0]); // Text in the VerticalLayout
     s.add_from_palette("Rectangle", None).unwrap();
-    assert_eq!(s.selection(), Some(&path(&[1, 2])));
+    assert_eq!(s.selection(), Some(&path(&[1])));
     let el = s.doc().element(&path(&[1, 2])).unwrap();
     assert!(el.bindings.iter().all(|b| b.name != "x" && b.name != "y"));
     assert!(!s.doc().text().contains("import"));
+}
+
+#[test]
+fn repeated_palette_adds_are_siblings_not_nested() {
+    let src = "export component Main inherits Rectangle {\n    width: 300px;\n    height: 300px;\n}\n";
+    let mut s = palette_session(src);
+    for _ in 0..3 {
+        s.add_from_palette("Rectangle", None).unwrap();
+        assert!(s.rebuild_standalone(300., 300.));
+    }
+    let root = s.doc().element(&path(&[])).unwrap();
+    assert_eq!(root.child_count, 3, "{}", s.doc().text());
+    for i in 0..3 {
+        assert_eq!(s.doc().element(&path(&[i])).unwrap().child_count, 0);
+    }
+    assert_eq!(s.selection(), Some(&path(&[])));
 }
 
 #[test]
