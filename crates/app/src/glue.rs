@@ -69,14 +69,14 @@ pub fn save_if_dirty(
     loaded: bool,
 ) -> Result<bool, String> {
     if !loaded {
-        return Err(format!("{file} was not loaded; refusing to overwrite it"));
+        return Err(format!("{file} を読み込めていないため、上書きしません"));
     }
     if !session.doc().is_dirty() {
         return Ok(false);
     }
     store
         .write(project, file, session.doc().text())
-        .map_err(|e| format!("Save failed: {e}"))?;
+        .map_err(|e| format!("保存に失敗しました: {e}"))?;
     session.mark_saved();
     Ok(true)
 }
@@ -95,7 +95,7 @@ pub fn save_or_recover(
         && loaded
         && let Err(re) = store.write_recovery(project, file, session.doc().text())
     {
-        return Err(format!("{e}; recovery copy not written: {re}"));
+        return Err(format!("{e}(復元用コピーも書けませんでした: {re})"));
     }
     r
 }
@@ -152,7 +152,7 @@ pub fn recovery_tick(
         if last.is_some() {
             store
                 .clear_recovery(project, file)
-                .map_err(|e| format!("Recovery copy not removed: {e}"))?;
+                .map_err(|e| format!("復元用コピーを削除できませんでした: {e}"))?;
             *last = None;
         }
         return Ok(false);
@@ -163,7 +163,7 @@ pub fn recovery_tick(
     }
     store
         .write_recovery(project, file, text)
-        .map_err(|e| format!("Recovery copy not written: {e}"))?;
+        .map_err(|e| format!("復元用コピーを書けませんでした: {e}"))?;
     *last = Some(text.to_string());
     Ok(true)
 }
@@ -181,9 +181,9 @@ pub fn pending_recovery(
         Ok(Some(_)) => store
             .clear_recovery(project, file)
             .map(|()| None)
-            .map_err(|e| format!("Recovery copy not removed: {e}")),
+            .map_err(|e| format!("復元用コピーを削除できませんでした: {e}")),
         Ok(None) => Ok(None),
-        Err(e) => Err(format!("Recovery copy not read: {e}")),
+        Err(e) => Err(format!("復元用コピーを読めませんでした: {e}")),
     }
 }
 
@@ -280,11 +280,25 @@ impl Glue {
         files
             .into_iter()
             .next()
-            .ok_or_else(|| format!("project {project} has no .slint files"))
+            .ok_or_else(|| format!("プロジェクト {project} に .slint ファイルがありません"))
     }
 
     fn set_error(&self, text: &str) {
         self.editor().set_error_text(text.into());
+    }
+
+    /// Start of every user action: drops the previous action's message and error (compile
+    /// diagnostics are shown again while they exist), then applies any pending property edit.
+    fn begin_action(&mut self) {
+        self.clear_feedback();
+        self.flush_prop();
+    }
+
+    fn clear_feedback(&self) {
+        let ed = self.editor();
+        ed.set_message("".into());
+        let diag = self.session.diagnostics().first().map(|d| d.message.clone());
+        ed.set_error_text(diag.unwrap_or_default().into());
     }
 
     fn sync_status(&self) {
@@ -435,8 +449,7 @@ impl Glue {
     }
 
     fn tidy(&mut self) {
-        self.flush_prop();
-        self.editor().set_message("".into());
+        self.begin_action();
         match self.session.tidy_free_selection(self.tolerance as f32) {
             Ok(report) => {
                 if report.changed > 0 {
@@ -455,6 +468,7 @@ impl Glue {
     }
 
     fn tolerance_step(&mut self, dir: i32) {
+        self.begin_action();
         let t = (self.tolerance + dir.signum() * TIDY_TOLERANCE_STEP)
             .clamp(TIDY_TOLERANCE_MIN, TIDY_TOLERANCE_MAX);
         if t == self.tolerance {
@@ -463,7 +477,7 @@ impl Glue {
         self.tolerance = t;
         self.editor().set_tidy_tolerance(t);
         if let Err(e) = self.store.set_setting(TIDY_TOLERANCE_KEY, &t.to_string()) {
-            self.set_error(&format!("Settings not saved: {e}"));
+            self.set_error(&format!("設定を保存できませんでした: {e}"));
         }
     }
 
@@ -530,8 +544,7 @@ impl Glue {
     }
 
     fn stack(&mut self) {
-        self.flush_prop();
-        self.editor().set_message("".into());
+        self.begin_action();
         match self.session.stack_selection() {
             Ok(warnings) => {
                 self.rebuild();
@@ -553,15 +566,13 @@ impl Glue {
     }
 
     fn unstack(&mut self) {
-        self.flush_prop();
-        self.editor().set_message("".into());
+        self.begin_action();
         let r = self.session.unstack_selection();
         self.after_edit(r);
     }
 
     fn guide_edited(&mut self, property: &str, value: &str) {
-        self.flush_prop();
-        self.editor().set_message("".into());
+        self.begin_action();
         let r = self.session.set_guide_property(property, value);
         self.after_edit(r);
     }
@@ -597,7 +608,7 @@ impl Glue {
     }
 
     fn open_file(&mut self, project: &str, file: &str) {
-        self.flush_prop();
+        self.begin_action();
         self.discard_source_edits();
         // Keep the current file open (and its error visible) if its edits cannot be saved.
         if self.loaded && !self.save() {
@@ -622,9 +633,8 @@ impl Glue {
 
     /// Saves if there are unsaved edits. Returns false when a save was needed and failed.
     pub fn save(&mut self) -> bool {
-        self.flush_prop();
+        self.begin_action();
         let ed = self.editor();
-        ed.set_message("".into());
         let r = save_or_recover(
             &*self.store,
             &self.project,
@@ -637,7 +647,7 @@ impl Glue {
                 if written {
                     self.last_recovery = None;
                 }
-                ed.set_message(if written { "Saved" } else { "No changes" }.into());
+                ed.set_message(if written { "保存しました" } else { "変更はありません" }.into());
                 true
             }
             Err(e) => {
@@ -657,10 +667,9 @@ impl Glue {
     }
 
     fn tree_selected(&mut self, row: i32) {
-        self.flush_prop();
+        self.begin_action();
         self.clear_tidy();
         self.discard_source_edits();
-        self.editor().set_message("".into());
         if let Some(r) = self.session.tree_rows().into_iter().nth(row as usize) {
             self.session.select_path(r.path);
         }
@@ -669,8 +678,7 @@ impl Glue {
     }
 
     fn tree_action(&mut self, action: i32) {
-        self.flush_prop();
-        self.editor().set_message("".into());
+        self.begin_action();
         let action = match action {
             0 => TreeAction::Up,
             1 => TreeAction::Down,
@@ -687,8 +695,7 @@ impl Glue {
     }
 
     fn palette_picked(&mut self, name: &str) {
-        self.flush_prop();
-        self.editor().set_message("".into());
+        self.begin_action();
         let ed = self.editor();
         let hint = (
             -ed.get_canvas_pan_x() / self.zoom,
@@ -699,25 +706,22 @@ impl Glue {
     }
 
     fn tapped(&mut self, x: f32, y: f32) {
-        self.flush_prop();
+        self.begin_action();
         self.clear_tidy();
         self.discard_source_edits();
-        self.editor().set_message("".into());
         self.session.tap(x / self.zoom, y / self.zoom);
         self.update_overlay();
         self.refresh_panels();
     }
 
     fn drag_finished(&mut self, dx: f32, dy: f32) {
-        self.flush_prop();
-        self.editor().set_message("".into());
+        self.begin_action();
         let r = self.session.move_selection(dx / self.zoom, dy / self.zoom);
         self.after_edit(r);
     }
 
     fn resize_finished(&mut self, corner: i32, dx: f32, dy: f32) {
-        self.flush_prop();
-        self.editor().set_message("".into());
+        self.begin_action();
         let r = self
             .session
             .resize_selection(corner_from(corner), dx / self.zoom, dy / self.zoom);
@@ -725,10 +729,9 @@ impl Glue {
     }
 
     fn history(&mut self, undo: bool) {
-        self.flush_prop();
+        self.begin_action();
         self.clear_tidy();
         self.discard_source_edits();
-        self.editor().set_message("".into());
         let changed = if undo { self.session.undo() } else { self.session.redo() };
         if changed {
             self.rebuild();
@@ -782,7 +785,7 @@ impl Glue {
         {
             return;
         }
-        self.editor().set_message("".into());
+        self.clear_feedback();
         match self.session.set_property(&p.name, &p.value) {
             Ok(()) => self.rebuild_with(refresh_props, true),
             Err(e) => self.set_error(&e.to_string()),
@@ -791,9 +794,9 @@ impl Glue {
 
     /// Replaces the shown source range of the document with the edited text.
     fn source_apply(&mut self, text: &str) {
-        self.flush_prop();
+        self.begin_action();
         let Some((start, original)) = self.source_view.clone() else {
-            self.set_error("Nothing to apply: the source is not shown");
+            self.set_error("反映するソースが表示されていません");
             return;
         };
         match self.session.replace_source(start, &original, text) {
@@ -809,24 +812,27 @@ impl Glue {
 
     /// Error band tap: shows the component containing the first diagnostic in the Source tab.
     fn error_tapped(&mut self) {
+        self.begin_action();
         let Some(diag) = self.session.diagnostics().first().cloned() else { return };
         let range = self.session.component_range_at(diag.offset);
-        self.show_source(Some(range), "Error location");
+        self.show_source(Some(range), "エラーの場所");
         self.editor().set_panel_tab(SOURCE_TAB);
     }
 
     fn zoom_by(&mut self, m: f32) {
+        self.begin_action();
         self.zoom = (self.zoom * m).clamp(MIN_ZOOM, MAX_ZOOM);
         self.editor().set_zoom_level(self.zoom);
     }
 
     fn create_project(&mut self, name: &str) {
+        self.begin_action();
         match self.store.create_project(name) {
             Ok(()) => {
                 self.refresh_lists();
                 self.select_project(name);
             }
-            Err(e) => self.set_error(&format!("Cannot create project {name}: {e}")),
+            Err(e) => self.set_error(&format!("プロジェクト {name} を作れませんでした: {e}")),
         }
     }
 
@@ -864,7 +870,7 @@ impl Glue {
     /// 3 rename `project`, 4 save as `name` in `project`. Errors stay in the dialog and
     /// change nothing.
     fn file_op_run(&mut self, mode: i32, name: &str, project: &str) {
-        self.editor().set_message("".into());
+        self.begin_action();
         self.dialog_error("");
         let project = if mode == 2 { self.project.clone() } else { project.to_string() };
         let project = project.as_str();
@@ -940,7 +946,7 @@ impl Glue {
                 self.refresh_lists();
                 self.rebuild();
                 self.op_done(&project);
-                self.editor().set_message(format!("Renamed to {new}").into());
+                self.editor().set_message(format!("{new} に名前を変えました").into());
             }
             Err(e) => self.dialog_error(&op_error(&e, name)),
         }
@@ -968,7 +974,7 @@ impl Glue {
                     self.select_project(name);
                 }
                 self.op_done(name);
-                self.editor().set_message(format!("Renamed to {name}").into());
+                self.editor().set_message(format!("{name} に名前を変えました").into());
             }
             Err(e) => self.dialog_error(&op_error(&e, name)),
         }
@@ -977,9 +983,9 @@ impl Glue {
     /// Writes the editor text to a new file and moves the session there. The original file
     /// is not written, even when the document had unsaved changes.
     fn save_as(&mut self, project: &str, name: &str) {
-        self.flush_prop();
+        self.begin_action();
         if !self.loaded {
-            self.dialog_error(&format!("{} was not loaded; nothing to save", self.file));
+            self.dialog_error(&format!("{} を読み込めていないため、保存できません", self.file));
             return;
         }
         let text = self.session.doc().text().to_string();
@@ -995,13 +1001,14 @@ impl Glue {
         self.refresh_lists();
         self.rebuild();
         self.op_done(project);
-        self.editor().set_message(format!("Saved as {file}").into());
+        self.editor().set_message(format!("{file} として保存しました").into());
         if let Err(e) = cleared {
-            self.set_error(&format!("Recovery copy of the original not removed: {e}"));
+            self.set_error(&format!("元ファイルの復元用コピーを削除できませんでした: {e}"));
         }
     }
 
     fn select_project(&mut self, name: &str) {
+        self.begin_action();
         self.editor()
             .set_files(to_model(self.store.files(name).unwrap_or_default()));
     }
@@ -1027,6 +1034,7 @@ impl Glue {
     }
 
     fn recovery_answered(&mut self, restore: bool) {
+        self.begin_action();
         self.editor().set_recovery_open(false);
         let Some((project, file, text)) = self.recovered.take() else { return };
         if restore {
@@ -1041,7 +1049,7 @@ impl Glue {
             self.editor().set_has_selection(false);
             self.rebuild();
         } else if let Err(e) = self.store.clear_recovery(&project, &file) {
-            self.set_error(&format!("Recovery copy not removed: {e}"));
+            self.set_error(&format!("復元用コピーを削除できませんでした: {e}"));
         }
     }
 
@@ -1065,8 +1073,7 @@ impl Glue {
     }
 
     fn extract_open(&mut self) {
-        self.flush_prop();
-        self.editor().set_message("".into());
+        self.begin_action();
         if self.session.selection().is_none() {
             self.set_error("部品にする要素を選んでください");
             return;
@@ -1089,7 +1096,7 @@ impl Glue {
     }
 
     fn extract_run(&mut self, name: &str) {
-        self.editor().set_message("".into());
+        self.begin_action();
         match self.session.extract_selection(name) {
             Ok(()) => {
                 self.discard_source_edits();
@@ -1104,6 +1111,7 @@ impl Glue {
     }
 
     fn declaration_add(&mut self, kind: i32, ty: &str, name: &str) {
+        self.begin_action();
         let Some(kind) = crate::session::DeclKind::from_index(kind) else { return };
         let component = self.extracted.clone();
         match self.session.add_declaration(&component, kind, ty, name) {
@@ -1117,7 +1125,7 @@ impl Glue {
     }
 
     fn choose_component(&mut self, name: &str) {
-        self.flush_prop();
+        self.begin_action();
         self.discard_source_edits();
         self.session.set_component(name);
         self.editor().set_has_selection(false);
@@ -1127,9 +1135,9 @@ impl Glue {
 
 fn op_error(e: &std::io::Error, name: &str) -> String {
     match e.kind() {
-        std::io::ErrorKind::AlreadyExists => format!("{name} already exists"),
+        std::io::ErrorKind::AlreadyExists => format!("{name} はすでにあります"),
         std::io::ErrorKind::InvalidInput => format!(
-            "{name:?} is not a valid name (no /, \\ or .. and no leading dot)"
+            "{name:?} は名前に使えません(/ \\ .. は不可、先頭のドットも不可)"
         ),
         _ => format!("{name}: {e}"),
     }
@@ -1253,7 +1261,7 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
                 g.rebuild();
                 g.check_recovery();
             }
-            Some(e) => g.set_error(&format!("Cannot open {e}")),
+            Some(e) => g.set_error(&format!("開けませんでした: {e}")),
         }
     }
 

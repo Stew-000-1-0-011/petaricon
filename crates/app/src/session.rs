@@ -18,25 +18,25 @@ const TAP_THRESHOLD: f32 = 8.0;
 pub enum SessionError {
     #[error(transparent)]
     Edit(#[from] EditError),
-    #[error("nothing is selected")]
+    #[error("要素が選ばれていません")]
     NoSelection,
-    #[error("the element is positioned by a layout")]
+    #[error("この要素はレイアウトが位置を決めています")]
     InLayout,
-    #[error("the element cannot contain children")]
+    #[error("この要素には子要素を入れられません")]
     NotAContainer,
-    #[error("the element is not a layout")]
+    #[error("この要素はレイアウトではありません")]
     NotALayout,
-    #[error("the selection is a layout; use Unstack to free its children first")]
+    #[error("選んだ要素はレイアウトです。先に「Unstack」で子要素を自由にしてください")]
     TidyOnLayout,
     #[error("プレビューを更新中です。もう一度押してください")]
     PreviewUpdating,
-    #[error("the container has no children to tidy")]
+    #[error("整える子要素がありません")]
     NoChildren,
-    #[error("the element has no geometry in the preview")]
+    #[error("プレビューに表示されていない要素です")]
     NoGeometry,
-    #[error("compile failed")]
+    #[error("コンパイルに失敗しました")]
     Compile(Vec<Diagnostic>),
-    #[error("the source changed since it was shown; reopen the source tab")]
+    #[error("表示後にソースが変わりました。ソースタブを開き直してください")]
     StaleSource,
 }
 
@@ -458,7 +458,7 @@ impl Session {
         let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
         if path.indices.is_empty() {
             return Err(EditError::InvalidTarget(
-                "the root element cannot be moved or resized".into(),
+                "ルート要素は移動も大きさ変更もできません".into(),
             )
             .into());
         }
@@ -574,10 +574,10 @@ impl Session {
         name: &str,
     ) -> Result<(), SessionError> {
         if !is_identifier(name) {
-            return Err(EditError::InvalidTarget(format!("`{name}` is not a valid name")).into());
+            return Err(EditError::InvalidTarget(format!("`{name}` は名前に使えません")).into());
         }
         if kind != DeclKind::Callback && !DECL_TYPES.contains(&ty) {
-            return Err(EditError::InvalidTarget(format!("`{ty}` is not a supported type")).into());
+            return Err(EditError::InvalidTarget(format!("`{ty}` は使えない型です")).into());
         }
         self.apply(Op::AddDeclaration {
             component: component.to_string(),
@@ -876,7 +876,7 @@ impl Session {
         let mut scratch = Document::new(self.doc.path().to_path_buf(), self.doc.text().to_string());
         let new_path = scratch
             .apply(Op::InsertElement { parent, index: None, source })?
-            .ok_or_else(|| EditError::InvalidTarget("insert returned no path".into()))?;
+            .ok_or_else(|| EditError::InvalidTarget("挿入した要素が見つかりません".into()))?;
         let mut text = scratch.text().to_string();
         if STD_WIDGETS.contains(&name) {
             text = with_std_import(&text, name);
@@ -950,7 +950,7 @@ impl Session {
             let kind = self.doc.element(&Self::child_path(&path, i)).map(|c| c.kind);
             if matches!(kind, Some(ElementKind::Repeated | ElementKind::Conditional)) {
                 return Err(EditError::InvalidTarget(
-                    "cannot stack a container with for / if children".into(),
+                    "for / if の子を持つ入れ物は並べ直せません".into(),
                 )
                 .into());
             }
@@ -993,7 +993,7 @@ impl Session {
                 .ok_or_else(|| EditError::ElementNotFound(Self::child_path(&path, i)))?;
             if matches!(ci.kind, ElementKind::Repeated | ElementKind::Conditional) {
                 return Err(EditError::InvalidTarget(
-                    "cannot tidy a container with for / if children".into(),
+                    "for / if の子を持つ入れ物は整えられません".into(),
                 )
                 .into());
             }
@@ -1149,7 +1149,7 @@ impl Session {
     pub fn tree_action(&mut self, path: &ElementPath, action: TreeAction) -> Result<(), SessionError> {
         let root_err = || {
             SessionError::Edit(EditError::InvalidTarget(
-                "the root element cannot be moved or removed".into(),
+                "ルート要素は移動も削除もできません".into(),
             ))
         };
         let Some((&index, parent_indices)) = path.indices.split_last() else {
@@ -1159,13 +1159,11 @@ impl Session {
             };
         };
         let parent = ElementPath { component: path.component.clone(), indices: parent_indices.to_vec() };
-        let nothing = |what: &str| {
-            SessionError::Edit(EditError::InvalidTarget(format!("cannot move {what}")))
-        };
+        let nothing = |msg: &str| SessionError::Edit(EditError::InvalidTarget(msg.into()));
         match action {
             TreeAction::Up => {
                 if index == 0 {
-                    return Err(nothing("further up"));
+                    return Err(nothing("これ以上、上へ移動できません"));
                 }
                 self.apply(Op::MoveElement {
                     path: path.clone(),
@@ -1176,7 +1174,7 @@ impl Session {
             TreeAction::Down => {
                 let count = self.doc.element(&parent).map_or(0, |p| p.child_count);
                 if index + 1 >= count {
-                    return Err(nothing("further down"));
+                    return Err(nothing("これ以上、下へ移動できません"));
                 }
                 self.apply(Op::MoveElement {
                     path: path.clone(),
@@ -1186,7 +1184,7 @@ impl Session {
             }
             TreeAction::Out => {
                 let Some((&parent_index, grand)) = parent.indices.split_last() else {
-                    return Err(nothing("out of the root"));
+                    return Err(nothing("ルート要素の外へは移動できません"));
                 };
                 let grandparent = ElementPath { component: path.component.clone(), indices: grand.to_vec() };
                 self.apply(Op::MoveElement {
@@ -1197,7 +1195,7 @@ impl Session {
             }
             TreeAction::In => {
                 if index == 0 {
-                    return Err(nothing("in: no previous sibling"));
+                    return Err(nothing("前の要素がないので、中へ入れられません"));
                 }
                 let mut sibling = parent;
                 sibling.indices.push(index - 1);

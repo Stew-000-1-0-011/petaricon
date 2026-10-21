@@ -63,11 +63,11 @@ pub struct LayoutSpec {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EditError {
-    #[error("element not found: {0:?}")]
+    #[error("要素が見つかりません: {0:?}")]
     ElementNotFound(ElementPath),
-    #[error("component not found: {0}")]
+    #[error("部品が見つかりません: {0}")]
     ComponentNotFound(String),
-    #[error("invalid target: {0}")]
+    #[error("{0}")]
     InvalidTarget(String),
 }
 
@@ -88,11 +88,11 @@ pub(crate) fn apply_edits(text: &str, mut edits: Vec<TextEdit>) -> Result<String
             || !text.is_char_boundary(e.start)
             || !text.is_char_boundary(e.end)
         {
-            return Err(EditError::InvalidTarget("edit range is invalid".into()));
+            return Err(EditError::InvalidTarget("編集範囲が不正です".into()));
         }
     }
     if edits.windows(2).any(|w| w[0].end > w[1].start) {
-        return Err(EditError::InvalidTarget("overlapping edits".into()));
+        return Err(EditError::InvalidTarget("編集が重なっています".into()));
     }
     let mut out = text.to_string();
     for e in edits.into_iter().rev() {
@@ -114,7 +114,7 @@ fn set_bindings(
     for (i, (name, _)) in bindings.iter().enumerate() {
         if bindings[..i].iter().any(|(n, _)| n == name) {
             return Err(EditError::InvalidTarget(format!(
-                "binding `{name}` given more than once"
+                "`{name}` が複数回指定されています"
             )));
         }
     }
@@ -129,7 +129,7 @@ fn set_bindings(
         match (existing, value) {
             (Some(b), Some(expr)) => {
                 let e = b.child_node(SyntaxKind::BindingExpression).ok_or_else(|| {
-                    EditError::InvalidTarget(format!("binding `{name}` has no expression"))
+                    EditError::InvalidTarget(format!("`{name}` に式がありません"))
                 })?;
                 let (start, end) = range(&e);
                 edits.push(TextEdit {
@@ -165,7 +165,7 @@ fn set_bindings(
     if !inserted.is_empty() {
         let brace = element
             .child_token(SyntaxKind::LBrace)
-            .ok_or_else(|| EditError::InvalidTarget("element has no `{`".into()))?;
+            .ok_or_else(|| EditError::InvalidTarget("要素に `{` がありません".into()))?;
         let at = usize::from(brace.text_range().end());
         edits.push(TextEdit {
             start: at,
@@ -306,7 +306,7 @@ fn check_source(source: &str) -> Result<(), EditError> {
         .is_some_and(|e| syntax::element_children(&e).len() == 1);
     if diag.has_errors() || !one {
         return Err(EditError::InvalidTarget(
-            "source is not exactly one element".into(),
+            "ソースは要素1つだけにしてください".into(),
         ));
     }
     Ok(())
@@ -368,7 +368,7 @@ fn insert_edit(
     }
     let brace = parent
         .child_token(SyntaxKind::RBrace)
-        .ok_or_else(|| EditError::InvalidTarget("element has no `}`".into()))?;
+        .ok_or_else(|| EditError::InvalidTarget("要素に `}` がありません".into()))?;
     let b = usize::from(brace.text_range().start());
     let ls = line_start(text, b);
     if text[ls..b].trim().is_empty() {
@@ -398,7 +398,7 @@ fn child_block(
     to_indent: &str,
 ) -> Result<String, EditError> {
     let element = syntax::inner_element(wrapper)
-        .ok_or_else(|| EditError::InvalidTarget("child has no element".into()))?;
+        .ok_or_else(|| EditError::InvalidTarget("子に要素がありません".into()))?;
     let ext = extent(text, wrapper);
     let from_indent = if ext.line_mode {
         syntax::line_indent(text, ext.start)
@@ -421,7 +421,7 @@ fn plain_children(element: &SyntaxNode) -> Result<Vec<SyntaxNode>, EditError> {
     let children = syntax::element_children(element);
     if children.iter().any(|c| c.kind() != SyntaxKind::SubElement) {
         return Err(EditError::InvalidTarget(
-            "repeated or conditional children cannot be moved into or out of a layout".into(),
+            "繰り返しや条件付きの子は、レイアウトの出し入れができません".into(),
         ));
     }
     Ok(children)
@@ -532,32 +532,32 @@ fn extract_component(
 ) -> Result<Vec<TextEdit>, EditError> {
     let (wrapper, element) = resolve_in(root, path)?;
     let wrapper = wrapper
-        .ok_or_else(|| EditError::InvalidTarget("the component root cannot be extracted".into()))?;
+        .ok_or_else(|| EditError::InvalidTarget("部品のルート要素は部品にできません".into()))?;
     if wrapper.kind() != SyntaxKind::SubElement {
         return Err(EditError::InvalidTarget(
-            "repeated or conditional elements cannot be extracted".into(),
+            "繰り返しや条件付きの要素は部品にできません".into(),
         ));
     }
     if !valid_identifier(name) {
         return Err(EditError::InvalidTarget(format!(
-            "`{name}` is not a valid component name"
+            "`{name}` は部品名に使えません"
         )));
     }
     if syntax::component_node(root, name).is_some() {
         return Err(EditError::InvalidTarget(format!(
-            "component `{name}` already exists"
+            "部品 `{name}` はすでにあります"
         )));
     }
     let type_name = crate::type_name(&element);
     let type_node = element
         .child_node(SyntaxKind::QualifiedName)
         .filter(|_| !type_name.is_empty())
-        .ok_or_else(|| EditError::InvalidTarget("element has no type".into()))?;
+        .ok_or_else(|| EditError::InvalidTarget("要素に型がありません".into()))?;
     let (Some(lb), Some(rb)) = (
         element.child_token(SyntaxKind::LBrace),
         element.child_token(SyntaxKind::RBrace),
     ) else {
-        return Err(EditError::InvalidTarget("element has no body".into()));
+        return Err(EditError::InvalidTarget("要素に本体がありません".into()));
     };
     let (body_start, body_end) = (
         usize::from(lb.text_range().end()),
@@ -655,13 +655,13 @@ fn add_declaration(
     let decl = decl.trim();
     if decl.is_empty() || decl.contains('\n') {
         return Err(EditError::InvalidTarget(
-            "declaration must be one non-empty line".into(),
+            "宣言は空でない1行にしてください".into(),
         ));
     }
     let node = syntax::component_node(root, component)
         .ok_or_else(|| EditError::ComponentNotFound(component.to_string()))?;
     let element = syntax::component_element(&node)
-        .ok_or_else(|| EditError::InvalidTarget("component has no root element".into()))?;
+        .ok_or_else(|| EditError::InvalidTarget("部品にルート要素がありません".into()))?;
     let last = element
         .children()
         .filter(|n| {
@@ -676,7 +676,7 @@ fn add_declaration(
         None => {
             let lb = element
                 .child_token(SyntaxKind::LBrace)
-                .ok_or_else(|| EditError::InvalidTarget("element has no `{`".into()))?;
+                .ok_or_else(|| EditError::InvalidTarget("要素に `{` がありません".into()))?;
             let first_member = element
                 .children()
                 .find(|n| n.kind() == SyntaxKind::Binding)
@@ -749,7 +749,7 @@ impl Document {
             Op::RemoveElement { path } => {
                 let (wrapper, _) = resolve_in(&root, &path)?;
                 let wrapper = wrapper.ok_or_else(|| {
-                    EditError::InvalidTarget("the component root cannot be removed".into())
+                    EditError::InvalidTarget("部品のルート要素は削除できません".into())
                 })?;
                 let (start, end) = extent(&self.text, &wrapper).remove;
                 let edit = TextEdit {
@@ -766,14 +766,14 @@ impl Document {
             } => {
                 let (wrapper, element) = resolve_in(&root, &path)?;
                 let wrapper = wrapper.ok_or_else(|| {
-                    EditError::InvalidTarget("the component root cannot be moved".into())
+                    EditError::InvalidTarget("部品のルート要素は移動できません".into())
                 })?;
                 let (_, dest) = resolve_in(&root, &new_parent)?;
                 if new_parent.component != path.component
                     || is_prefix(&path.indices, &new_parent.indices)
                 {
                     return Err(EditError::InvalidTarget(
-                        "cannot move an element into itself or another component".into(),
+                        "要素を自分自身や別の部品の中へは移動できません".into(),
                     ));
                 }
                 let ext = extent(&self.text, &wrapper);
@@ -839,26 +839,26 @@ impl Document {
                     LayoutKind::Vertical => "VerticalLayout",
                     _ => {
                         return Err(EditError::InvalidTarget(
-                            "layout kind must be Horizontal or Vertical".into(),
+                            "レイアウトは Horizontal か Vertical にしてください".into(),
                         ));
                     }
                 };
                 let children = syntax::element_children(&element);
                 if children.is_empty() {
-                    return Err(EditError::InvalidTarget("container has no children".into()));
+                    return Err(EditError::InvalidTarget("入れ物に子要素がありません".into()));
                 }
                 let children = plain_children(&element)?;
                 let mut seen = vec![false; children.len()];
                 for &i in &layout.order {
                     if i >= children.len() || std::mem::replace(&mut seen[i], true) {
                         return Err(EditError::InvalidTarget(
-                            "order is not a permutation of the children".into(),
+                            "並び順が子要素と一致しません".into(),
                         ));
                     }
                 }
                 if layout.order.len() != children.len() {
                     return Err(EditError::InvalidTarget(
-                        "order is not a permutation of the children".into(),
+                        "並び順が子要素と一致しません".into(),
                     ));
                 }
                 let indent = syntax::child_indent(&self.text, &element);
@@ -894,14 +894,14 @@ impl Document {
             Op::Unwrap { layout, positions } => {
                 let (wrapper, element) = resolve_in(&root, &layout)?;
                 let wrapper = wrapper.ok_or_else(|| {
-                    EditError::InvalidTarget("the component root cannot be unwrapped".into())
+                    EditError::InvalidTarget("部品のルート要素は解除できません".into())
                 })?;
                 if crate::layout_kind(&crate::type_name(&element)).is_none() {
-                    return Err(EditError::InvalidTarget("element is not a layout".into()));
+                    return Err(EditError::InvalidTarget("要素がレイアウトではありません".into()));
                 }
                 if wrapper.kind() != SyntaxKind::SubElement {
                     return Err(EditError::InvalidTarget(
-                        "repeated or conditional layouts cannot be unwrapped".into(),
+                        "繰り返しや条件付きのレイアウトは解除できません".into(),
                     ));
                 }
                 let mut parent_path = layout.clone();
@@ -909,13 +909,13 @@ impl Document {
                 let (_, parent) = resolve_in(&root, &parent_path)?;
                 if crate::layout_kind(&crate::type_name(&parent)).is_some() {
                     return Err(EditError::InvalidTarget(
-                        "the parent is a layout; its children cannot take x / y".into(),
+                        "親がレイアウトのため、子の x / y は指定できません".into(),
                     ));
                 }
                 let children = plain_children(&element)?;
                 if children.len() != positions.len() {
                     return Err(EditError::InvalidTarget(
-                        "positions must match the number of children".into(),
+                        "位置の数が子要素の数と一致しません".into(),
                     ));
                 }
                 let indent = syntax::child_indent(&self.text, &parent);

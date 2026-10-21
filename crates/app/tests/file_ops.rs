@@ -82,7 +82,7 @@ fn save_as_writes_editor_text_to_new_file_and_leaves_original_alone() {
     assert!(strings(editor.get_files()).contains(&"copy.slint".to_string()));
     // Saving now means nothing to write.
     editor.invoke_save();
-    assert_eq!(editor.get_message().as_str(), "No changes");
+    assert_eq!(editor.get_message().as_str(), "変更はありません");
 }
 
 #[test]
@@ -326,7 +326,7 @@ fn rename_is_aborted_when_the_save_before_it_fails() {
         editor.set_file_op(mode);
         editor.set_error_text("".into());
         run(&editor, mode, name, "default");
-        assert!(editor.get_error_text().contains("Save failed") || editor.get_dialog_error().contains("Save failed"));
+        assert!(editor.get_error_text().contains("保存に失敗しました") || editor.get_dialog_error().contains("Save failed"));
         assert_eq!(editor.get_current_file().as_str(), "main.slint");
         assert_eq!(editor.get_current_project().as_str(), "default");
         assert!(editor.get_dirty());

@@ -155,3 +155,18 @@ fn bad_stored_tolerance_falls_back_to_the_default() {
         assert_eq!(editor.get_tidy_tolerance(), want, "{raw}");
     }
 }
+
+#[test]
+fn a_later_action_clears_the_previous_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let editor = start(&dir);
+    editor.invoke_tree_selected(2); // a leaf rectangle
+    editor.invoke_tidy();
+    assert!(!editor.get_error_text().is_empty());
+    editor.invoke_zoom(1.25);
+    assert_eq!(editor.get_error_text().as_str(), "");
+    editor.invoke_tidy();
+    assert!(!editor.get_error_text().is_empty());
+    editor.invoke_tapped(5., 5.);
+    assert_eq!(editor.get_error_text().as_str(), "");
+}

@@ -108,7 +108,7 @@ fn open_file_aborts_when_saving_the_current_file_fails() {
     editor.invoke_open("default".into(), "other.slint".into());
     assert_eq!(editor.get_current_file().as_str(), "main.slint");
     assert!(editor.get_dirty(), "edits must still be pending");
-    assert!(editor.get_error_text().contains("Save failed"));
+    assert!(editor.get_error_text().contains("保存に失敗しました"));
 
     fail.set(false);
     editor.invoke_open("default".into(), "other.slint".into());
@@ -277,11 +277,11 @@ fn save_without_changes_says_no_changes() {
     let (_d, store) = two_files();
     let editor = glue_editor(store);
     editor.invoke_save();
-    assert_eq!(editor.get_message().as_str(), "No changes");
+    assert_eq!(editor.get_message().as_str(), "変更はありません");
     editor.invoke_tapped(60., 60.);
     editor.invoke_drag_finished(40., 40.);
     editor.invoke_save();
-    assert_eq!(editor.get_message().as_str(), "Saved");
+    assert_eq!(editor.get_message().as_str(), "保存しました");
 }
 
 #[test]
@@ -296,7 +296,7 @@ fn failed_save_writes_a_recovery_copy() {
     let mut s = session(SRC);
     s.replace_text(format!("{SRC}// edited\n"));
     let r = save_or_recover(&store, "p", "main.slint", &mut s, true);
-    assert!(r.unwrap_err().contains("Save failed"));
+    assert!(r.unwrap_err().contains("保存に失敗しました"));
     assert!(s.doc().is_dirty());
     assert_eq!(
         store.take_recovery("p", "main.slint").unwrap().as_deref(),
@@ -325,7 +325,7 @@ fn closing_with_a_failing_save_keeps_the_window_and_shows_the_error() {
     fail.set(true);
     editor.window().dispatch_event(WindowEvent::CloseRequested);
     assert!(editor.window().is_visible(), "window must stay open");
-    assert!(editor.get_error_text().contains("Save failed"));
+    assert!(editor.get_error_text().contains("保存に失敗しました"));
     let s = LocalStore::new(dir.path().to_path_buf()).unwrap();
     assert!(s.take_recovery("default", "main.slint").unwrap().is_some());
     // Once saving works, closing hides the window.
