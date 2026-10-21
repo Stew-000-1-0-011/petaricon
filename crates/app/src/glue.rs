@@ -1140,9 +1140,12 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
         })
     });
     connect(editor, &glue);
+    #[cfg(target_os = "android")]
+    editor.set_touch_input(true);
     #[cfg(debug_assertions)]
     if let Some(h) = fake_keyboard_height() {
         editor.set_fake_keyboard(h);
+        editor.set_touch_input(true);
     }
     {
         let mut g = glue.borrow_mut();

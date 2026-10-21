@@ -84,7 +84,8 @@ fn retype(editor: &app::Editor, value: &str) {
 }
 
 fn elapse(ms: u64) {
-    
+    // Let pending property changes (timer start/stop) run before time moves, as an event loop would.
+    slint::platform::update_timers_and_animations();
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(ms));
     slint::platform::update_timers_and_animations();
 }
@@ -163,4 +164,66 @@ fn tapping_the_canvas_closes_the_bar_and_leaves_the_new_selection_alone() {
     editor.set_fake_keyboard(300.);
     slint::platform::update_timers_and_animations();
     assert!(!editor.get_bar_visible());
+}
+
+// ---- touch input (Android): the bar's field is the only text input that ever takes focus ----
+
+fn start_touch(h: f32) -> (tempfile::TempDir, app::Editor) {
+    let (d, editor) = start(h);
+    editor.set_touch_input(true);
+    slint::platform::update_timers_and_animations();
+    (d, editor)
+}
+
+#[test]
+fn touch_tap_opens_the_focused_bar_without_a_keyboard_yet() {
+    let (dir, editor) = start_touch(0.);
+    assert!(!editor.get_kb_shown());
+    open_bar(&editor);
+    // The row has no text input to focus; typing goes straight into the bar.
+    retype(&editor, "33px");
+    elapse(400);
+    assert!(saved_after(&editor, &dir).contains("33px"));
+    // The keyboard appearing later does not disturb the open bar.
+    editor.set_fake_keyboard(300.);
+    elapse(50);
+    assert!(editor.get_bar_visible());
+}
+
+#[test]
+fn touch_transient_keyboard_hide_keeps_the_bar() {
+    let (_d, editor) = start_touch(300.);
+    open_bar(&editor);
+    elapse(600);
+    editor.set_fake_keyboard(0.);
+    elapse(100);
+    editor.set_fake_keyboard(300.);
+    elapse(600);
+    assert!(editor.get_bar_visible(), "a hide shorter than 300 ms must not close the bar");
+    retype(&editor, "12px");
+}
+
+#[test]
+fn touch_hide_right_after_opening_is_ignored() {
+    let (_d, editor) = start_touch(300.);
+    open_bar(&editor);
+    editor.set_fake_keyboard(0.);
+    elapse(350);
+    assert!(editor.get_bar_visible(), "no close within 500 ms of opening");
+}
+
+#[test]
+fn touch_sustained_keyboard_hide_flushes_and_closes() {
+    let (dir, editor) = start_touch(300.);
+    open_bar(&editor);
+    retype(&editor, "21px");
+    assert!(!editor.get_dirty());
+    elapse(600);
+    editor.set_fake_keyboard(0.);
+    elapse(200);
+    assert!(editor.get_bar_visible());
+    elapse(200);
+    assert!(!editor.get_bar_visible());
+    assert!(editor.get_dirty(), "closing applies the pending edit");
+    assert!(saved_after(&editor, &dir).contains("21px"));
 }

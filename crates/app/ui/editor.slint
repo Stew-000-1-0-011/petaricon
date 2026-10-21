@@ -28,6 +28,10 @@ export component Editor inherits Window {
     in property <bool> dirty;
     // Debug: PETARICON_FAKE_KEYBOARD=<height> pretends a keyboard of that height is up.
     in property <length> fake-keyboard;
+    // Touch input (Android): Props values and guide numbers open the input bar directly, so the bar's
+    // field is the only text input to take focus (Android hides/re-shows the keyboard on every
+    // text-to-text focus change).
+    in property <bool> touch-input: false;
     in property <[TreeRowItem]> tree-rows;
     in property <[string]> palette;
     in property <float> zoom-level: 1.0;
@@ -103,9 +107,10 @@ export component Editor inherits Window {
     property <string> prop-editing;
     property <length> prop-bottom;
     in-out property <string> bar-text;
-    out property <bool> want-prop: root.prop-editing != "" && root.kb-shown && root.prop-bottom > root.kb-y;
-    out property <bool> want-guide: cv.editing-prop != "" && root.kb-shown
-        && root.content-y + cv.editing-y + 44px > root.kb-y;
+    out property <bool> want-prop: root.prop-editing != "" && (root.touch-input
+        || (root.kb-shown && root.prop-bottom > root.kb-y));
+    out property <bool> want-guide: cv.editing-prop != "" && (root.touch-input
+        || (root.kb-shown && root.content-y + cv.editing-y + 44px > root.kb-y));
     out property <bool> bar-visible: root.want-prop || root.want-guide;
     // Bumped by the glue whenever the Props rows are rebuilt (selection, document or undo changed).
     in property <int> props-rev;
@@ -129,8 +134,36 @@ export component Editor inherits Window {
             cv.editing-prop = "";
         }
     }
+    // Touch input: the bar sits above the keyboard, or at the window bottom until it shows up.
+    property <length> bar-y: root.kb-shown ? root.kb-y - root.bar-h : root.height - root.inset-bottom - root.bar-h;
+    // The keyboard has been up during this bar session (so a later hide is a real hide).
+    property <bool> kb-seen;
+    // True for 500 ms after the bar opened: keyboard hides then are never acted on.
+    property <bool> open-guard;
+    Timer {
+        interval: 500ms;
+        running: root.open-guard;
+        triggered => { root.open-guard = false; }
+    }
+    // Touch input: closes the bar once the keyboard has stayed hidden for 300 ms.
+    Timer {
+        interval: 300ms;
+        running: root.touch-input && root.bar-visible && root.kb-seen && !root.kb-shown;
+        triggered => {
+            if !root.open-guard {
+                root.close-prop-bar();
+                root.finish-guide-bar();
+            }
+        }
+    }
+    changed bar-visible => {
+        root.kb-seen = root.bar-visible && root.kb-shown;
+        root.open-guard = root.bar-visible;
+    }
     changed kb-shown => {
-        if !root.kb-shown {
+        if root.kb-shown {
+            root.kb-seen = root.bar-visible;
+        } else if !root.touch-input {
             root.close-prop-bar();
             root.finish-guide-bar();
         }
@@ -142,7 +175,7 @@ export component Editor inherits Window {
             root.close-prop-bar();
             root.guide-bar-used = true;
             root.bar-text = cv.editing-value;
-        } else if !root.kb-shown {
+        } else if !root.kb-shown && !root.touch-input {
             root.finish-guide-bar();
         } else if cv.editing-prop == "" {
             root.guide-bar-used = false;
@@ -189,14 +222,30 @@ export component Editor inherits Window {
                 width: row1.content-width;
                 padding: 4px;
                 spacing: 3px;
-                ToolButton { text: "≡"; min-width: 44px; clicked => { root.menu-open = true; } }
+                // Drawn icon: three bars (no font glyph).
+                Rectangle {
+                    min-width: 48px;
+                    preferred-width: 48px;
+                    horizontal-stretch: 0;
+                    border-radius: 4px;
+                    background: menu-ta.pressed ? #4a5058 : #383d44;
+                    for k in 3: Rectangle {
+                        x: (parent.width - self.width) / 2;
+                        y: parent.height / 2 - 9px + k * 8px - 1px;
+                        width: 20px;
+                        height: 3px;
+                        border-radius: 1.5px;
+                        background: white;
+                    }
+                    menu-ta := TouchArea { clicked => { root.menu-open = true; } }
+                }
                 ToolButton { text: "Undo"; clicked => { root.undo(); } }
                 ToolButton { text: "Redo"; clicked => { root.redo(); } }
                 ToolButton { text: root.dirty ? "Save*" : "Save"; min-width: 64px; clicked => { root.save(); } }
                 if !root.narrow: ToolButton { text: "Stack"; min-width: 60px; clicked => { root.stack(); } }
                 if !root.narrow: ToolButton { text: "Unstack"; min-width: 72px; clicked => { root.unstack(); } }
                 if !root.narrow: ToolButton { text: "Extract"; min-width: 68px; clicked => { root.extract-open(); } }
-                ToolButton { text: "−"; clicked => { root.zoom(0.8); } }
+                ToolButton { text: "-"; clicked => { root.zoom(0.8); } }
                 ToolButton { text: "+"; clicked => { root.zoom(1.25); } }
             }
         }
@@ -249,6 +298,7 @@ export component Editor inherits Window {
         height: root.wide ? root.content-h : root.content-h - root.panel-h-eff;
         factory: root.factory;
         popup-hidden: root.want-guide;
+        touch-input: root.touch-input;
         has-selection: root.has-selection;
         sel-movable: root.sel-movable;
         sel-x: root.sel-x;
@@ -291,9 +341,12 @@ export component Editor inherits Window {
         props: root.props;
         source-title: root.source-title;
         source-text <=> root.source-text;
+        touch-input: root.touch-input;
         kb-overlap: root.kb-shown ? max(0px, root.panel-bottom - root.kb-y) : 0px;
         tab <=> root.panel-tab;
         value-focused(n, t, b) => {
+            // Switching fields while the bar is open: the old target gets its pending edit first.
+            if root.prop-editing != "" && root.prop-editing != n { root.close-prop-bar(); }
             root.prop-editing = n;
             root.prop-bottom = b;
             root.prop-rev-at = root.props-rev;
@@ -321,7 +374,7 @@ export component Editor inherits Window {
 
     if root.bar-visible: Rectangle {
         x: 0px;
-        y: root.kb-y - root.bar-h;
+        y: root.touch-input ? root.bar-y : root.kb-y - root.bar-h;
         width: root.width;
         height: root.bar-h;
         background: #2a2e33;

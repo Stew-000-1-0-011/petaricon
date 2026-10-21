@@ -59,6 +59,8 @@ export component Canvas inherits Rectangle {
     in property <int> guides-rev;
     changed guides-rev => { root.editing-prop = ""; }
     callback guide-edited(string /* property */, string /* value */);
+    // Touch devices edit the guide number in the input bar, not in a popup field.
+    in property <bool> touch-input;
     in-out property <string> editing-prop;
     in-out property <string> editing-value;
     // The window's input bar edits the value instead (the popup would be under the keyboard).
@@ -247,12 +249,15 @@ export component Canvas inherits Rectangle {
         Dashes { x: 0px; y: parent.height - 2px; len: parent.width; }
         Dashes { x: 0px; y: 0px; len: parent.height; vertical: true; }
         Dashes { x: parent.width - 2px; y: 0px; len: parent.height; vertical: true; }
-        Text {
+        // Drawn arrow (no font glyph): down for a vertical guide, right otherwise.
+        Path {
             x: 4px;
             y: 4px;
-            text: root.g-vertical ? "↓" : "→";
-            color: #4fc3f7;
-            font-size: 16px;
+            width: 14px;
+            height: 14px;
+            commands: root.g-vertical ? "M 7 0 L 7 12 M 1 6 L 7 12 L 13 6" : "M 0 7 L 12 7 M 6 1 L 12 7 L 6 13";
+            stroke: #4fc3f7;
+            stroke-width: 2px;
         }
     }
 
@@ -304,7 +309,7 @@ export component Canvas inherits Rectangle {
         }
     }
 
-    if root.editing-prop != "": Rectangle {
+    if root.editing-prop != "" && !root.touch-input: Rectangle {
         visible: !root.popup-hidden;
         x: root.editing-x;
         y: root.editing-y;
