@@ -126,11 +126,7 @@ pub fn plan(container_w: f32, container_h: f32, children: &[Rect], grid: i32) ->
     };
 
     let mut order: Vec<usize> = (0..children.len()).collect();
-    order.sort_by(|&a, &b| {
-        axes(&children[a], direction)
-            .0
-            .total_cmp(&axes(&children[b], direction).0)
-    });
+    order.sort_by(|&a, &b| axes(&children[a], direction).0.total_cmp(&axes(&children[b], direction).0));
 
     // Spacing: median of gaps, overlaps clamped to 0.
     let mut overlap = false;
@@ -156,11 +152,7 @@ pub fn plan(container_w: f32, container_h: f32, children: &[Rect], grid: i32) ->
         0
     } else {
         let n = gaps.len();
-        let median = if n % 2 == 1 {
-            gaps[n / 2]
-        } else {
-            (gaps[n / 2 - 1] + gaps[n / 2]) / 2.0
-        };
+        let median = if n % 2 == 1 { gaps[n / 2] } else { (gaps[n / 2 - 1] + gaps[n / 2]) / 2.0 };
         snap(median, grid)
     };
 
@@ -195,157 +187,93 @@ pub fn plan(container_w: f32, container_h: f32, children: &[Rect], grid: i32) ->
         })
         .collect();
     let min_start = cross.iter().map(|c| c.0).fold(f32::INFINITY, f32::min);
-    let max_end = cross
-        .iter()
-        .map(|c| c.0 + c.1)
-        .fold(f32::NEG_INFINITY, f32::max);
+    let max_end = cross.iter().map(|c| c.0 + c.1).fold(f32::NEG_INFINITY, f32::max);
     let cross_start = min_start;
     let cross_end = container_cross - max_end;
     let band = max_end - min_start;
     let avail = container_cross - cross_start - cross_end;
 
-    let cross_align =
-        if children.len() >= 2 && cross.iter().all(|c| c.1 >= 0.9 * band) && band >= 0.9 * avail {
-            CrossAlign::Stretch
-        } else {
-            let mean_center =
-                cross.iter().map(|c| c.0 + c.1 / 2.0).sum::<f32>() / cross.len() as f32;
-            let start_dev: f32 = cross.iter().map(|c| c.0 - min_start).sum();
-            let end_dev: f32 = cross.iter().map(|c| max_end - (c.0 + c.1)).sum();
-            let center_dev: f32 = cross
-                .iter()
-                .map(|c| (c.0 + c.1 / 2.0 - mean_center).abs())
-                .sum();
-            let mut best = (CrossAlign::Start, start_dev);
-            if center_dev < best.1 {
-                best = (CrossAlign::Center, center_dev);
-            }
-            if end_dev < best.1 {
-                best = (CrossAlign::End, end_dev);
-            }
-            best.0
-        };
+    let cross_align = if children.len() >= 2
+        && cross.iter().all(|c| c.1 >= 0.9 * band)
+        && band >= 0.9 * avail
+    {
+        CrossAlign::Stretch
+    } else {
+        let mean_center = cross.iter().map(|c| c.0 + c.1 / 2.0).sum::<f32>() / cross.len() as f32;
+        let start_dev: f32 = cross.iter().map(|c| c.0 - min_start).sum();
+        let end_dev: f32 = cross.iter().map(|c| max_end - (c.0 + c.1)).sum();
+        let center_dev: f32 = cross.iter().map(|c| (c.0 + c.1 / 2.0 - mean_center).abs()).sum();
+        let mut best = (CrossAlign::Start, start_dev);
+        if center_dev < best.1 {
+            best = (CrossAlign::Center, center_dev);
+        }
+        if end_dev < best.1 {
+            best = (CrossAlign::End, end_dev);
+        }
+        best.0
+    };
 
     let (ma, mb) = (snap(main_pad_a, grid), snap(main_pad_b, grid));
     let (ca, cb) = (snap(cross_start, grid), snap(cross_end, grid));
     let padding = match direction {
-        Direction::Horizontal => Padding {
-            left: ma,
-            right: mb,
-            top: ca,
-            bottom: cb,
-        },
-        Direction::Vertical => Padding {
-            left: ca,
-            right: cb,
-            top: ma,
-            bottom: mb,
-        },
+        Direction::Horizontal => Padding { left: ma, right: mb, top: ca, bottom: cb },
+        Direction::Vertical => Padding { left: ca, right: cb, top: ma, bottom: mb },
     };
 
-    Some(Plan {
-        direction,
-        order,
-        spacing,
-        padding,
-        main_align,
-        cross_align,
-        warnings,
-    })
+    Some(Plan { direction, order, spacing, padding, main_align, cross_align, warnings })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {
-        Rect { x, y, w, h }
-    }
+    fn r(x: f32, y: f32, w: f32, h: f32) -> Rect { Rect { x, y, w, h } }
 
-    #[test]
-    fn empty_is_none() {
-        assert_eq!(plan(300., 200., &[], 4), None);
-    }
+    #[test] fn empty_is_none() { assert_eq!(plan(300., 200., &[], 4), None); }
 
-    #[test]
-    fn single_child_is_vertical_without_warning() {
+    #[test] fn single_child_is_vertical_without_warning() {
         let p = plan(300., 200., &[r(20., 30., 100., 40.)], 4).unwrap();
         assert_eq!(p.direction, Direction::Vertical);
         assert!(p.warnings.is_empty());
         assert_eq!(p.order, vec![0]);
     }
 
-    #[test]
-    fn horizontal_row_with_uneven_gaps() {
-        let kids = [
-            r(150., 22., 40., 30.),
-            r(16., 20., 40., 30.),
-            r(66., 18., 40., 30.),
-            r(197., 21., 40., 30.),
-        ];
+    #[test] fn horizontal_row_with_uneven_gaps() {
+        let kids = [r(150., 22., 40., 30.), r(16., 20., 40., 30.), r(66., 18., 40., 30.), r(197., 21., 40., 30.)];
         let p = plan(300., 80., &kids, 4).unwrap();
         assert_eq!(p.direction, Direction::Horizontal);
         assert_eq!(p.order, vec![1, 2, 0, 3]);
         assert_eq!(p.spacing, 12);
-        assert_eq!(
-            p.padding,
-            Padding {
-                left: 16,
-                right: 16,
-                top: 20,
-                bottom: 28
-            }
-        );
+        assert_eq!(p.padding, Padding { left: 16, right: 16, top: 20, bottom: 28 });
         assert_eq!(p.main_align, MainAlign::Start);
         assert_eq!(p.cross_align, CrossAlign::Center);
     }
 
-    #[test]
-    fn vertical_centered_column() {
-        let kids = [
-            r(100., 20., 100., 30.),
-            r(80., 58., 140., 30.),
-            r(110., 96., 80., 30.),
-        ];
+    #[test] fn vertical_centered_column() {
+        let kids = [r(100., 20., 100., 30.), r(80., 58., 140., 30.), r(110., 96., 80., 30.)];
         let p = plan(300., 146., &kids, 4).unwrap();
         assert_eq!(p.direction, Direction::Vertical);
         assert_eq!(p.spacing, 8);
-        assert_eq!(
-            p.padding,
-            Padding {
-                left: 80,
-                right: 80,
-                top: 20,
-                bottom: 20
-            }
-        );
+        assert_eq!(p.padding, Padding { left: 80, right: 80, top: 20, bottom: 20 });
         assert_eq!(p.main_align, MainAlign::Center);
         assert_eq!(p.cross_align, CrossAlign::Center);
     }
 
-    #[test]
-    fn full_width_rows_stretch() {
+    #[test] fn full_width_rows_stretch() {
         let kids = [r(12., 10., 276., 30.), r(12., 48., 275., 30.)];
         let p = plan(300., 200., &kids, 4).unwrap();
         assert_eq!(p.cross_align, CrossAlign::Stretch);
     }
 
-    #[test]
-    fn overlap_warns_and_clamps() {
+    #[test] fn overlap_warns_and_clamps() {
         let kids = [r(10., 10., 50., 30.), r(50., 12., 50., 30.)];
         let p = plan(200., 60., &kids, 4).unwrap();
         assert_eq!(p.spacing, 0);
         assert!(p.warnings.contains(&Warning::Overlap));
     }
 
-    #[test]
-    fn grid_layout_is_ambiguous() {
-        let kids = [
-            r(10., 10., 40., 40.),
-            r(60., 10., 40., 40.),
-            r(10., 60., 40., 40.),
-            r(60., 60., 40., 40.),
-        ];
+    #[test] fn grid_layout_is_ambiguous() {
+        let kids = [r(10., 10., 40., 40.), r(60., 10., 40., 40.), r(10., 60., 40., 40.), r(60., 60., 40., 40.)];
         let p = plan(200., 200., &kids, 4).unwrap();
         assert!(p.warnings.contains(&Warning::AmbiguousDirection));
     }

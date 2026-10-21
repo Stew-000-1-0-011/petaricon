@@ -77,25 +77,37 @@ fn near_grid_becomes_exact_grid() {
         assert_eq!((rs[k].2, rs[k].3), (60., 60.));
         assert!((rs[k].0 - kid.rect.x).abs() <= 16. && (rs[k].1 - kid.rect.y).abs() <= 16.);
     }
-    assert!(
-        o.relations
-            .iter()
-            .any(|x| matches!(x, Relation::EqualGap { axis: Axis::X, .. }))
-    );
-    assert!(
-        o.relations
-            .iter()
-            .any(|x| matches!(x, Relation::Align { axis: Axis::X, .. }))
-    );
-    assert!(
-        o.relations
-            .iter()
-            .any(|x| matches!(x, Relation::Align { axis: Axis::Y, .. }))
-    );
-    assert!(
-        o.relations
-            .iter()
-            .any(|x| matches!(x, Relation::Repeat { .. }))
+    assert_relations_hold(&o);
+    let al = |axis, members: Vec<usize>, coord| Relation::Align {
+        axis,
+        anchor: Anchor::Start,
+        members,
+        coord,
+    };
+    let rp = |dx, dy, pairs: Vec<(usize, usize)>| Relation::Repeat { dx, dy, pairs };
+    let gap = |members: Vec<usize>| Relation::EqualGap {
+        axis: Axis::X,
+        members,
+        gap: 50.,
+    };
+    // Symmetry about the bounding-box line (x = 179.5) would need half-pixel
+    // positions, so it does not hold on the integer grid and is not reported.
+    assert_eq!(
+        o.relations,
+        vec![
+            al(Axis::X, vec![2, 5], 260.),
+            al(Axis::X, vec![1, 4], 150.),
+            al(Axis::X, vec![0, 3], 40.),
+            al(Axis::Y, vec![0, 1, 2], 39.),
+            al(Axis::Y, vec![3, 4, 5], 142.),
+            gap(vec![0, 1, 2]),
+            gap(vec![3, 4, 5]),
+            rp(220., 0., vec![(3, 5), (0, 2)]),
+            rp(110., 0., vec![(4, 5), (0, 1), (3, 4), (1, 2)]),
+            rp(110., -103., vec![(3, 1), (4, 2)]),
+            rp(110., 103., vec![(1, 5), (0, 4)]),
+            rp(0., 103., vec![(1, 4), (0, 3), (2, 5)]),
+        ]
     );
     assert_eq!(
         rs,
@@ -171,6 +183,7 @@ fn conflicting_relations_stay_finite_and_bounded() {
         c(88., 44., 40., 40.),
     ];
     let a = tidy(300., 200., &kids, 16.);
+    assert_relations_hold(&a);
     let b = tidy(300., 200., &kids, 16.);
     assert_eq!(rects(&a), rects(&b));
     for (k, rc) in a.rects.iter().enumerate() {
@@ -343,4 +356,203 @@ fn sixty_children_are_fast() {
 fn empty_input() {
     let o = tidy(100., 100., &[], 16.);
     assert!(o.rects.is_empty() && o.relations.is_empty());
+}
+
+// ---- shared checks ---------------------------------------------------------
+
+const HALF: f32 = 0.5 + 1e-6;
+
+fn anchor_of(rc: &Rect, axis: Axis, anchor: Anchor) -> f32 {
+    let (p, s) = if axis == Axis::X {
+        (rc.x, rc.w)
+    } else {
+        (rc.y, rc.h)
+    };
+    match anchor {
+        Anchor::Start => p,
+        Anchor::Center => p + s / 2.,
+        Anchor::End => p + s,
+    }
+}
+fn span(v: &[f32]) -> f32 {
+    let lo = v.iter().copied().fold(f32::INFINITY, f32::min);
+    let hi = v.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    hi - lo
+}
+
+/// Every reported relation must hold on the final rects (to half a pixel).
+fn assert_relations_hold(o: &Outcome) {
+    let rc = &o.rects;
+    for rel in &o.relations {
+        match rel {
+            Relation::SameSize {
+                axis,
+                members,
+                value,
+            } => {
+                for &m in members {
+                    let s = if *axis == Axis::X { rc[m].w } else { rc[m].h };
+                    assert_eq!(s, *value as f32, "{rel:?}");
+                }
+            }
+            Relation::Align {
+                axis,
+                anchor,
+                members,
+                coord,
+            } => {
+                let v: Vec<f32> = members
+                    .iter()
+                    .map(|&m| anchor_of(&rc[m], *axis, *anchor))
+                    .collect();
+                assert!(span(&v) <= HALF, "{rel:?} {v:?}");
+                assert!(v.iter().all(|x| (x - coord).abs() <= HALF), "{rel:?} {v:?}");
+            }
+            Relation::EqualGap { axis, members, gap } => {
+                let gaps: Vec<f32> = members
+                    .windows(2)
+                    .map(|w| {
+                        anchor_of(&rc[w[1]], *axis, Anchor::Start)
+                            - anchor_of(&rc[w[0]], *axis, Anchor::End)
+                    })
+                    .collect();
+                assert!(span(&gaps) <= HALF, "{rel:?} {gaps:?}");
+                assert!(
+                    gaps.iter().all(|x| (x - gap).abs() <= HALF),
+                    "{rel:?} {gaps:?}"
+                );
+            }
+            Relation::Repeat { dx, dy, pairs } => {
+                for &(i, j) in pairs {
+                    assert!((rc[j].x - rc[i].x - dx).abs() <= HALF, "{rel:?}");
+                    assert!((rc[j].y - rc[i].y - dy).abs() <= HALF, "{rel:?}");
+                }
+            }
+            Relation::Symmetric {
+                axis,
+                center,
+                pairs,
+                singles,
+            } => {
+                for &(i, j) in pairs {
+                    let m = (anchor_of(&rc[i], *axis, Anchor::Center)
+                        + anchor_of(&rc[j], *axis, Anchor::Center))
+                        / 2.;
+                    assert!((m - center).abs() <= HALF, "{rel:?}");
+                }
+                for &i in singles {
+                    assert!(
+                        (anchor_of(&rc[i], *axis, Anchor::Center) - center).abs() <= HALF,
+                        "{rel:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+struct Lcg(u32);
+impl Lcg {
+    fn next(&mut self) -> u32 {
+        self.0 = self.0.wrapping_mul(1664525).wrapping_add(1013904223);
+        self.0 >> 8
+    }
+    fn range(&mut self, lo: i32, hi: i32) -> f32 {
+        (lo + (self.next() % (hi - lo + 1) as u32) as i32) as f32
+    }
+}
+
+#[test]
+fn shuffled_input_gives_identical_output_and_relations_hold() {
+    let mut rng = Lcg(2024);
+    let mut checked = 0;
+    for case in 0..60 {
+        let mut kids: Vec<Child> = Vec::new();
+        if case % 2 == 0 {
+            // near-regular grid with jitter and the odd size
+            let (rows, cols) = (1 + case % 4, 2 + case % 3);
+            for rr in 0..rows {
+                for cc in 0..cols {
+                    let sz = if (rr + cc) % 5 == 4 { 31. } else { 60. };
+                    kids.push(c(
+                        30. + cc as f32 * 100. + rng.range(-6, 6),
+                        30. + rr as f32 * 90. + rng.range(-6, 6),
+                        sz,
+                        sz,
+                    ));
+                }
+            }
+        } else {
+            // cluttered: many elements in a small area, few distinct sizes
+            for _ in 0..(6 + case % 9) {
+                let w = [30., 40., 44., 90.][(rng.next() % 4) as usize];
+                kids.push(Child {
+                    rect: r(
+                        rng.range(0, 260),
+                        rng.range(0, 200),
+                        w,
+                        [30., 36., 60.][(rng.next() % 3) as usize],
+                    ),
+                    w_explicit: rng.next().is_multiple_of(2),
+                    h_explicit: rng.next().is_multiple_of(2),
+                });
+            }
+        }
+        let base = tidy(400., 300., &kids, 16.);
+        assert_relations_hold(&base);
+        for (k, rc) in base.rects.iter().enumerate() {
+            let src = kids[k].rect;
+            assert!(
+                (rc.x - src.x).abs() <= 16. && (rc.y - src.y).abs() <= 16.,
+                "case {case} el {k}"
+            );
+        }
+        for _ in 0..12 {
+            let n = kids.len();
+            let mut perm: Vec<usize> = (0..n).collect();
+            for i in (1..n).rev() {
+                perm.swap(i, (rng.next() as usize) % (i + 1));
+            }
+            let shuffled: Vec<Child> = perm.iter().map(|&i| kids[i]).collect();
+            let o = tidy(400., 300., &shuffled, 16.);
+            assert_relations_hold(&o);
+            for (pos, &orig) in perm.iter().enumerate() {
+                assert_eq!(
+                    o.rects[pos], base.rects[orig],
+                    "case {case} perm {perm:?} element {orig}"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 720);
+}
+
+#[test]
+fn near_vertical_repeat_is_not_split_by_sign() {
+    // a column whose x wobbles around 100 (sign of dx flips between pairs)
+    let xs = [100., 99., 101., 98., 100.];
+    let kids: Vec<Child> = xs
+        .iter()
+        .enumerate()
+        .map(|(k, &x)| c(x, 20. + 80. * k as f32, 40., 40.))
+        .collect();
+    let o = tidy(1000., 1000., &kids, 16.);
+    assert_relations_hold(&o);
+    assert!(o.rects.iter().all(|rc| rc.x == o.rects[0].x));
+    let best = o
+        .relations
+        .iter()
+        .filter_map(|x| match x {
+            Relation::Repeat { dx, dy, pairs } => Some((*dx, *dy, pairs.len())),
+            _ => None,
+        })
+        .max_by_key(|v| v.2)
+        .expect("a repeat relation");
+    assert_eq!(
+        best.2, 4,
+        "all four consecutive pairs share one repeat: {:?}",
+        o.relations
+    );
+    assert_eq!((best.0, best.1), (0., 80.));
 }

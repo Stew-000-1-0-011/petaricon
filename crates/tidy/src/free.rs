@@ -135,6 +135,8 @@ fn cluster(items: &mut [(f64, usize)], t: f64, min_len: usize) -> Vec<Vec<usize>
 struct AlignCl {
     anchor: Anchor,
     members: Vec<usize>,
+    /// Index of this cluster's free "anchor value" variable in the axis system.
+    var: usize,
 }
 
 /// Step 3.2-1: one alignment cluster per element and axis.
@@ -170,6 +172,12 @@ fn align_clusters(g: &[G], a: Axis, t: f64) -> Vec<AlignCl> {
     loop {
         for c in cands.iter_mut() {
             c.members.retain(|&i| !used[i]);
+            let vals = c.members.iter().map(|&i| {
+                let k = ANCHORS[c.anchor_rank];
+                pos(g, i, a) + anchor_off(k, size(g, i, a))
+            });
+            c.lo = vals.clone().fold(f64::INFINITY, f64::min);
+            c.hi = vals.fold(f64::NEG_INFINITY, f64::max);
         }
         let mut best: Option<usize> = None;
         for k in 0..cands.len() {
@@ -205,6 +213,7 @@ fn align_clusters(g: &[G], a: Axis, t: f64) -> Vec<AlignCl> {
         chosen.push(AlignCl {
             anchor: ANCHORS[cands[b].anchor_rank],
             members,
+            var: 0,
         });
         cands[b].members.clear();
     }
@@ -231,14 +240,24 @@ enum Kind {
 #[derive(Default)]
 struct AxisEqs {
     eqs: Vec<Eq>,
+    /// Free helper variables (indices `n..n + extra`): one per alignment
+    /// cluster, equal-gap group and repeat group.  They make the equations
+    /// symmetric in their members, so no member acts as a reference.
+    extra: usize,
 }
 
 impl AxisEqs {
+    fn new_var(&mut self, n: usize) -> usize {
+        self.extra += 1;
+        n + self.extra - 1
+    }
     fn involved(&self, n: usize, on: &[Kind]) -> Vec<bool> {
         let mut v = vec![false; n];
         for e in self.eqs.iter().filter(|e| on.contains(&e.kind)) {
             for &(i, _) in &e.terms {
-                v[i] = true;
+                if i < n {
+                    v[i] = true;
+                }
             }
         }
         v
@@ -287,23 +306,32 @@ fn solve(mut m: Vec<f64>, mut rhs: Vec<f64>, n: usize) -> Vec<f64> {
     x
 }
 
-/// Step 3.3: minimise `sum 1000*(a.p - b)^2 + sum (p_i - p0_i)^2`.
-fn solve_axis(p0: &[f64], eqs: &[Eq], on: &[Kind]) -> Vec<f64> {
+/// Step 3.3: minimise `sum 1000*(a.p - b)^2 + sum (p_i - p0_i)^2` (the second
+/// sum runs over the real positions only; helper variables are free).
+fn solve_axis(p0: &[f64], axis_eqs: &AxisEqs, on: &[Kind]) -> Vec<f64> {
     let n = p0.len();
-    let mut m = vec![0.0; n * n];
-    let mut rhs = p0.to_vec();
+    let dim = n + axis_eqs.extra;
+    let mut m = vec![0.0; dim * dim];
+    let mut rhs = vec![0.0; dim];
+    rhs[..n].copy_from_slice(p0);
     for i in 0..n {
-        m[i * n + i] = 1.0;
+        m[i * dim + i] = 1.0;
     }
-    for e in eqs.iter().filter(|e| on.contains(&e.kind)) {
+    for e in axis_eqs.eqs.iter().filter(|e| on.contains(&e.kind)) {
         for &(i, ci) in &e.terms {
             rhs[i] += RELATION_WEIGHT * ci * e.b;
             for &(j, cj) in &e.terms {
-                m[i * n + j] += RELATION_WEIGHT * ci * cj;
+                m[i * dim + j] += RELATION_WEIGHT * ci * cj;
             }
         }
     }
-    solve(m, rhs, n)
+    // Helper variables of disabled families appear in no equation; pin them.
+    for k in n..dim {
+        if m[k * dim + k] == 0.0 {
+            m[k * dim + k] = 1.0;
+        }
+    }
+    solve(m, rhs, dim)
 }
 
 /// Rounds to an integer; first snaps to 0.1 so that the tiny residual of the
@@ -411,21 +439,22 @@ fn find_repeats(g: &[G], t: f64) -> Vec<Rep> {
         j: usize,
     }
     let n = g.len();
+    // Both orientations of every pair are clustered (a single canonical sign
+    // would split near-vertical or near-diagonal vectors); a cluster and its
+    // mirror image are the same relation, so a chosen cluster also consumes
+    // the twins of its members.
     let mut vs: Vec<V> = Vec::new();
     for i in 0..n {
-        for j in i + 1..n {
-            let (mut a, mut b) = (i, j);
-            let mut dx = g[b][0] - g[a][0];
-            let mut dy = g[b][1] - g[a][1];
-            if dx < 0.0 || (dx == 0.0 && dy < 0.0) {
-                std::mem::swap(&mut a, &mut b);
-                dx = -dx;
-                dy = -dy;
+        for j in 0..n {
+            if i == j {
+                continue;
             }
+            let dx = g[j][0] - g[i][0];
+            let dy = g[j][1] - g[i][1];
             if dx.hypot(dy) < t {
                 continue;
             }
-            vs.push(V { dx, dy, i: a, j: b });
+            vs.push(V { dx, dy, i, j });
         }
     }
     vs.sort_by(|p, q| {
@@ -434,6 +463,11 @@ fn find_repeats(g: &[G], t: f64) -> Vec<Rep> {
             .then_with(|| cmp_geo(&g[p.i], &g[q.i]))
             .then_with(|| cmp_geo(&g[p.j], &g[q.j]))
     });
+    let index: std::collections::HashMap<(usize, usize), usize> = vs
+        .iter()
+        .enumerate()
+        .map(|(k, v)| ((v.i, v.j), k))
+        .collect();
     let mut used = vec![false; vs.len()];
     let mut out = Vec::new();
     for s in 0..vs.len() {
@@ -470,8 +504,10 @@ fn find_repeats(g: &[G], t: f64) -> Vec<Rep> {
         }
         for &k in &best {
             used[k] = true;
+            used[index[&(vs[k].j, vs[k].i)]] = true;
         }
         used[s] = true;
+        used[index[&(vs[s].j, vs[s].i)]] = true;
         // A source or target may appear once, otherwise two near-identical
         // elements would be forced onto the same spot.
         let mut srcs = Vec::new();
@@ -493,20 +529,173 @@ fn find_repeats(g: &[G], t: f64) -> Vec<Rep> {
     out
 }
 
+/// Everything found by the relation search, before solving.
+struct Found {
+    aligns: [Vec<AlignCl>; 2],
+    gap_groups: Vec<(Axis, Vec<usize>)>,
+    repeats: Vec<Rep>,
+    syms: Vec<(Axis, Sym)>,
+}
+
+fn ax(a: Axis) -> usize {
+    if a == Axis::X { 0 } else { 1 }
+}
+
 /// Solves both axes with the given relation families and rounds the result.
 /// Sizes come from `g`; positions not touched by any equation keep `orig`.
-fn solve_all(orig: &[G], g: &[G], eqs: &[AxisEqs; 2], on: &[Kind]) -> Vec<G> {
+/// Members of an alignment cluster are snapped to the cluster's rounded value.
+/// With `keep_orig`, an involved element whose net change is below 0.5 keeps
+/// its exact original value.
+fn solve_all(
+    orig: &[G],
+    g: &[G],
+    eqs: &[AxisEqs; 2],
+    found: &Found,
+    on: &[Kind],
+    keep_orig: bool,
+) -> Vec<G> {
     let n = g.len();
     let mut out = g.to_vec();
-    for (k, a) in AXES.iter().copied().enumerate() {
+    for a in AXES {
+        let k = ax(a);
         let p0: Vec<f64> = (0..n).map(|i| pos(orig, i, a)).collect();
         let inv = eqs[k].involved(n, on);
-        let sol = solve_axis(&p0, &eqs[k].eqs, on);
+        let sol = solve_axis(&p0, &eqs[k], on);
+        let mut p: Vec<f64> = (0..n)
+            .map(|i| if inv[i] { round_coord(sol[i]) } else { p0[i] })
+            .collect();
+        for cl in &found.aligns[k] {
+            let v = cl
+                .members
+                .iter()
+                .map(|&i| sol[i] + anchor_off(cl.anchor, size(g, i, a)))
+                .sum::<f64>()
+                / cl.members.len() as f64;
+            for &i in &cl.members {
+                p[i] = round_coord(v - anchor_off(cl.anchor, size(g, i, a)));
+            }
+        }
         for i in 0..n {
-            out[i][pos_ix(a)] = if inv[i] { round_coord(sol[i]) } else { p0[i] };
+            if keep_orig && inv[i] && (p[i] - p0[i]).abs() < 0.5 {
+                p[i] = p0[i];
+            }
+            out[i][pos_ix(a)] = p[i];
         }
     }
     out
+}
+
+/// A reported relation holds on the final rects when its quantities agree to
+/// within half a pixel (exact on the integer grid; the slack only covers odd
+/// sizes whose centres fall on half pixels).
+const HOLDS: f64 = 0.5 + 1e-9;
+
+fn spread(vals: impl Iterator<Item = f64>) -> f64 {
+    let (lo, hi) = vals.fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| {
+        (l.min(v), h.max(v))
+    });
+    hi - lo
+}
+
+fn mean(vals: &[f64]) -> f64 {
+    vals.iter().sum::<f64>() / vals.len() as f64 + 0.0
+}
+
+/// Builds the relations of the enabled families from the FINAL rects.  Returns
+/// the relations and whether every one of them holds; with `drop_invalid`,
+/// relations that do not hold are left out instead.
+fn report(g: &[G], found: &Found, on: &[Kind], drop_invalid: bool) -> (Vec<Relation>, Vec<Kind>) {
+    let mut rels = Vec::new();
+    let mut bad: Vec<Kind> = Vec::new();
+    let mut push = |kind: Kind, rel: Relation, ok: bool, rels: &mut Vec<Relation>| {
+        if !ok && !bad.contains(&kind) {
+            bad.push(kind);
+        }
+        if ok || !drop_invalid {
+            rels.push(rel);
+        }
+    };
+    for a in AXES {
+        for cl in &found.aligns[ax(a)] {
+            let vals: Vec<f64> = cl
+                .members
+                .iter()
+                .map(|&i| pos(g, i, a) + anchor_off(cl.anchor, size(g, i, a)))
+                .collect();
+            let ok = spread(vals.iter().copied()) <= HOLDS;
+            let rel = Relation::Align {
+                axis: a,
+                anchor: cl.anchor,
+                members: cl.members.clone(),
+                coord: mean(&vals) as f32,
+            };
+            push(Kind::Align, rel, ok, &mut rels);
+        }
+    }
+    if on.contains(&Kind::Gap) {
+        for (a, order) in &found.gap_groups {
+            let a = *a;
+            let gaps: Vec<f64> = order
+                .windows(2)
+                .map(|w| pos(g, w[1], a) - pos(g, w[0], a) - size(g, w[0], a))
+                .collect();
+            let ok = spread(gaps.iter().copied()) <= HOLDS;
+            let rel = Relation::EqualGap {
+                axis: a,
+                members: order.clone(),
+                gap: mean(&gaps) as f32,
+            };
+            push(Kind::Gap, rel, ok, &mut rels);
+        }
+    }
+    if on.contains(&Kind::Repeat) {
+        for rep in &found.repeats {
+            let mut dxs: Vec<f64> = rep.pairs.iter().map(|&(i, j)| g[j][0] - g[i][0]).collect();
+            let mut dys: Vec<f64> = rep.pairs.iter().map(|&(i, j)| g[j][1] - g[i][1]).collect();
+            let ok = spread(dxs.iter().copied()) <= HOLDS && spread(dys.iter().copied()) <= HOLDS;
+            let mut pairs = rep.pairs.clone();
+            let (mx, my) = (mean(&dxs), mean(&dys));
+            // report the orientation whose dominant component is positive
+            if (mx.abs() >= my.abs() && mx < 0.0) || (mx.abs() < my.abs() && my < 0.0) {
+                for pr in pairs.iter_mut() {
+                    *pr = (pr.1, pr.0);
+                }
+                dxs.iter_mut().for_each(|v| *v = -*v);
+                dys.iter_mut().for_each(|v| *v = -*v);
+            }
+            let rel = Relation::Repeat {
+                dx: mean(&dxs) as f32,
+                dy: mean(&dys) as f32,
+                pairs,
+            };
+            push(Kind::Repeat, rel, ok, &mut rels);
+        }
+    }
+    if on.contains(&Kind::Symmetric) {
+        for (a, sym) in &found.syms {
+            let a = *a;
+            let mut ok = true;
+            let mut mids = Vec::new();
+            for &(i, j) in &sym.pairs {
+                let m = (center(g, i, a) + center(g, j, a)) / 2.0;
+                ok &= (m - sym.center).abs() <= HOLDS / 2.0;
+                mids.push(m);
+            }
+            for &i in &sym.singles {
+                let m = center(g, i, a);
+                ok &= (m - sym.center).abs() <= HOLDS;
+                mids.push(m);
+            }
+            let rel = Relation::Symmetric {
+                axis: a,
+                center: mean(&mids) as f32,
+                pairs: sym.pairs.clone(),
+                singles: sym.singles.clone(),
+            };
+            push(Kind::Symmetric, rel, ok, &mut rels);
+        }
+    }
+    (rels, bad)
 }
 
 pub fn tidy(container_w: f32, container_h: f32, children: &[Child], tolerance: f32) -> Outcome {
@@ -569,32 +758,36 @@ pub fn tidy(container_w: f32, container_h: f32, children: &[Child], tolerance: f
         }
     };
     let mut eqs = [AxisEqs::default(), AxisEqs::default()];
-    let ax = |a: Axis| if a == Axis::X { 0 } else { 1 };
+    let mut found = Found {
+        aligns: [
+            align_clusters(&g, Axis::X, t),
+            align_clusters(&g, Axis::Y, t),
+        ],
+        gap_groups: Vec::new(),
+        repeats: Vec::new(),
+        syms: Vec::new(),
+    };
 
-    // 3.2-1 alignment
-    let aligns = [
-        align_clusters(&g, Axis::X, t),
-        align_clusters(&g, Axis::Y, t),
-    ];
+    // 3.2-1 alignment: p_m + offset_m = c_cluster for every member
     for a in AXES {
-        for cl in &aligns[ax(a)] {
-            let s0 = cl.members[0];
-            let off0 = anchor_off(cl.anchor, size(&g, s0, a));
-            for &m in &cl.members[1..] {
-                let off = anchor_off(cl.anchor, size(&g, m, a));
-                eqs[ax(a)].eqs.push(Eq {
+        let k = ax(a);
+        for ci in 0..found.aligns[k].len() {
+            let var = eqs[k].new_var(n);
+            found.aligns[k][ci].var = var;
+            let cl = &found.aligns[k][ci];
+            for &m in &cl.members {
+                eqs[k].eqs.push(Eq {
                     kind: Kind::Align,
-                    terms: vec![(m, 1.0), (s0, -1.0)],
-                    b: off0 - off,
+                    terms: vec![(m, 1.0), (var, -1.0)],
+                    b: -anchor_off(cl.anchor, size(&g, m, a)),
                 });
             }
         }
     }
 
     // 3.2-2 equal gaps: elements sharing a row (column) along the other axis
-    let mut gap_groups: Vec<(Axis, Vec<usize>)> = Vec::new();
     for a in AXES {
-        for cl in &aligns[ax(other(a))] {
+        for cl in &found.aligns[ax(other(a))] {
             if cl.members.len() < 3 {
                 continue;
             }
@@ -603,36 +796,36 @@ pub fn tidy(container_w: f32, container_h: f32, children: &[Child], tolerance: f
                 pos(&g, p, a)
                     .total_cmp(&pos(&g, q, a))
                     .then(size(&g, p, a).total_cmp(&size(&g, q, a)))
+                    .then_with(|| cmp_geo(&g[p], &g[q]))
             });
             let gaps: Vec<f64> = order
                 .windows(2)
                 .map(|w| pos(&g, w[1], a) - pos(&g, w[0], a) - size(&g, w[0], a))
                 .collect();
-            let gmax = gaps.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let gmin = gaps.iter().copied().fold(f64::INFINITY, f64::min);
-            if gmax - gmin > t {
+            if spread(gaps.iter().copied()) > t {
                 continue;
             }
-            for w in order.windows(3) {
+            let var = eqs[ax(a)].new_var(n);
+            for w in order.windows(2) {
                 eqs[ax(a)].eqs.push(Eq {
                     kind: Kind::Gap,
-                    terms: vec![(w[0], -1.0), (w[1], 2.0), (w[2], -1.0)],
-                    b: size(&g, w[0], a) - size(&g, w[1], a),
+                    terms: vec![(w[1], 1.0), (w[0], -1.0), (var, -1.0)],
+                    b: size(&g, w[0], a),
                 });
             }
-            gap_groups.push((a, order));
+            found.gap_groups.push((a, order));
         }
     }
 
-    // 3.2-3 repeated offsets
-    let repeats = find_repeats(&g, t);
-    for rep in &repeats {
-        let (k, l) = rep.pairs[0];
-        for &(i, j) in &rep.pairs[1..] {
-            for a in AXES {
+    // 3.2-3 repeated offsets: p_j - p_i = d_group on both axes
+    found.repeats = find_repeats(&g, t);
+    for rep in &found.repeats {
+        for a in AXES {
+            let var = eqs[ax(a)].new_var(n);
+            for &(i, j) in &rep.pairs {
                 eqs[ax(a)].eqs.push(Eq {
                     kind: Kind::Repeat,
-                    terms: vec![(j, 1.0), (i, -1.0), (l, -1.0), (k, 1.0)],
+                    terms: vec![(j, 1.0), (i, -1.0), (var, -1.0)],
                     b: 0.0,
                 });
             }
@@ -640,7 +833,6 @@ pub fn tidy(container_w: f32, container_h: f32, children: &[Child], tolerance: f
     }
 
     // 3.2-4 symmetry
-    let mut syms: Vec<(Axis, Sym)> = Vec::new();
     for a in AXES {
         if let Some(s) = find_symmetry(&g, a, container(a), t) {
             for &(i, j) in &s.pairs {
@@ -657,101 +849,62 @@ pub fn tidy(container_w: f32, container_h: f32, children: &[Child], tolerance: f
                     b: s.center - size(&g, i, a) / 2.0,
                 });
             }
-            syms.push((a, s));
+            found.syms.push((a, s));
         }
     }
 
-    // 3.3 solve and round.  If the combined solution would move some element
-    // by more than the tolerance (relations that contradict each other), give
-    // up whole relation families, weakest first; alignment alone never does.
-    let levels: [&[Kind]; 4] = [
-        &[Kind::Align, Kind::Gap, Kind::Repeat, Kind::Symmetric],
-        &[Kind::Align, Kind::Gap, Kind::Symmetric],
-        &[Kind::Align, Kind::Gap],
-        &[Kind::Align],
-    ];
-    let mut on = levels[3];
-    for lv in levels {
-        let sol = solve_all(&orig, &g, &eqs, lv);
-        let ok = (0..n).all(|i| {
-            AXES.iter()
-                .all(|&a| (pos(&sol, i, a) - pos(&orig, i, a)).abs() <= t)
-        });
-        if ok {
-            on = lv;
-            break;
-        }
-    }
-    g = solve_all(&orig, &g, &eqs, on);
-    let gap_groups: Vec<_> = if on.contains(&Kind::Gap) {
-        gap_groups
-    } else {
-        Vec::new()
-    };
-    let repeats: Vec<Rep> = if on.contains(&Kind::Repeat) {
-        repeats
-    } else {
-        Vec::new()
-    };
-    let syms: Vec<_> = if on.contains(&Kind::Symmetric) {
-        syms
-    } else {
-        Vec::new()
-    };
-
-    // 3.4 report with the final coordinates
-    for a in AXES {
-        for cl in &aligns[ax(a)] {
-            let s0 = cl.members[0];
-            let coord = pos(&g, s0, a) + anchor_off(cl.anchor, size(&g, s0, a));
-            relations.push(Relation::Align {
-                axis: a,
-                anchor: cl.anchor,
-                members: cl.members.clone(),
-                coord: coord as f32,
+    // 3.3 solve and round.  A set of families is accepted when no element
+    // moves more than the tolerance and every relation it reports holds on the
+    // final rects.  Otherwise families are given up: for a too-large move the
+    // weakest first (repeat, symmetry, equal gaps); for relations that do not
+    // hold, exactly the families that failed.  Alignment alone is accepted
+    // unconditionally, with any relation that does not hold left out.
+    let mut on = vec![Kind::Align, Kind::Gap, Kind::Repeat, Kind::Symmetric];
+    let chosen: (Vec<G>, Vec<Relation>) = loop {
+        let mut next: Option<Vec<Kind>> = None;
+        let mut accepted = None;
+        for keep_orig in [true, false] {
+            let sol = solve_all(&orig, &g, &eqs, &found, &on, keep_orig);
+            let moved_ok = (0..n).all(|i| {
+                AXES.iter()
+                    .all(|&a| (pos(&sol, i, a) - pos(&orig, i, a)).abs() <= t)
             });
+            let (rels, bad) = report(&sol, &found, &on, false);
+            if moved_ok && bad.is_empty() {
+                accepted = Some((sol, rels));
+                break;
+            }
+            if !keep_orig {
+                let removable: Vec<Kind> = if !moved_ok {
+                    [Kind::Repeat, Kind::Symmetric, Kind::Gap]
+                        .into_iter()
+                        .filter(|k| on.contains(k))
+                        .take(1)
+                        .collect()
+                } else {
+                    bad.iter().copied().filter(|&k| k != Kind::Align).collect()
+                };
+                if removable.is_empty() {
+                    // only alignment is left (and it always moves <= T)
+                    let (rels, _) = report(&sol, &found, &on, true);
+                    accepted = Some((sol, rels));
+                } else {
+                    next = Some(
+                        on.iter()
+                            .copied()
+                            .filter(|k| !removable.contains(k))
+                            .collect(),
+                    );
+                }
+            }
         }
-    }
-    for (a, order) in gap_groups {
-        let gaps: Vec<f64> = order
-            .windows(2)
-            .map(|w| pos(&g, w[1], a) - pos(&g, w[0], a) - size(&g, w[0], a))
-            .collect();
-        let gap = gaps.iter().sum::<f64>() / gaps.len() as f64;
-        relations.push(Relation::EqualGap {
-            axis: a,
-            members: order,
-            gap: gap as f32,
-        });
-    }
-    for rep in repeats {
-        let k = rep.pairs.len() as f64;
-        let dx = rep
-            .pairs
-            .iter()
-            .map(|&(i, j)| g[j][0] - g[i][0])
-            .sum::<f64>()
-            / k;
-        let dy = rep
-            .pairs
-            .iter()
-            .map(|&(i, j)| g[j][1] - g[i][1])
-            .sum::<f64>()
-            / k;
-        relations.push(Relation::Repeat {
-            dx: dx as f32,
-            dy: dy as f32,
-            pairs: rep.pairs,
-        });
-    }
-    for (a, s) in syms {
-        relations.push(Relation::Symmetric {
-            axis: a,
-            center: s.center as f32,
-            pairs: s.pairs,
-            singles: s.singles,
-        });
-    }
+        if let Some(done) = accepted {
+            break done;
+        }
+        on = next.expect("a family was removed");
+    };
+    let (g, rels) = chosen;
+    relations.extend(rels);
 
     let rects = g
         .iter()
