@@ -106,6 +106,8 @@ pub fn save_if_dirty(
     store
         .write(project, file, session.doc().text())
         .map_err(|e| format!("保存に失敗しました: {e}"))?;
+    // An imported file may have been fixed: values that failed before deserve a new try.
+    preview::clear_verdicts();
     session.mark_saved();
     Ok(true)
 }
@@ -753,6 +755,7 @@ impl Glue {
         } else {
             self.rebuild();
         }
+        self.fit_zoom();
         self.update_overlay();
         self.refresh_panels();
     }
@@ -942,7 +945,12 @@ impl Glue {
         self.clear_feedback();
         if p.name == "size" {
             match parse_screen_size(&p.value) {
-                Some(size) => self.session.set_screen_size(size),
+                Some(size) => {
+                    self.session.set_screen_size(size);
+                    if refresh {
+                        self.fit_zoom();
+                    }
+                }
                 None => {
                     // Typing "80" on the way to "800x360" is not worth an error yet.
                     if refresh {
@@ -981,7 +989,24 @@ impl Glue {
     fn screen_size_chosen(&mut self, w: i32, h: i32) {
         self.begin_action();
         self.session.set_screen_size((w.max(1) as u32, h.max(1) as u32));
+        self.fit_zoom();
         self.preview_changed(true);
+    }
+
+    /// Zooms and pans so the whole screen is visible in the canvas.
+    fn fit_zoom(&mut self) {
+        let ed = self.editor();
+        let (w, h) = self.session.screen_size();
+        let (vw, vh) = (ed.get_canvas_view_w(), ed.get_canvas_view_h());
+        let margin = 16.0;
+        if vw <= margin * 2.0 || vh <= margin * 2.0 {
+            return;
+        }
+        let z = ((vw - margin) / w.max(1) as f32).min((vh - margin) / h.max(1) as f32);
+        self.zoom = z.clamp(MIN_ZOOM, MAX_ZOOM);
+        ed.set_zoom_level(self.zoom);
+        ed.set_canvas_pan_x(((vw - w as f32 * self.zoom) / 2.0).max(8.0));
+        ed.set_canvas_pan_y(((vh - h as f32 * self.zoom) / 2.0).max(8.0));
     }
 
     /// Replaces the shown source range of the document with the edited text.
@@ -1323,6 +1348,7 @@ impl Glue {
         self.session.set_component(name);
         self.editor().set_has_selection(false);
         self.rebuild();
+        self.fit_zoom();
     }
 }
 

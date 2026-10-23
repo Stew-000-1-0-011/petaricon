@@ -164,3 +164,16 @@ fn a_known_bad_value_costs_one_compile_after_the_first_time() {
     assert_eq!(again.dropped.len(), 1);
     assert_eq!(preview::compile_count() - before, 1);
 }
+
+#[test]
+fn clearing_verdicts_makes_a_known_bad_value_be_tried_again() {
+    i_slint_backend_testing::init_no_event_loop();
+    let vals = [v("n", "4"), v("label", "1 +")];
+    let text = format!("{PARAM}\n// clear probe");
+    preview::compile_with(&text, Path::new("/t/p.slint"), "P", &vals).unwrap();
+    preview::compile_with(&text, Path::new("/t/p.slint"), "P", &vals).unwrap();
+    preview::clear_verdicts();
+    let before = preview::compile_count();
+    preview::compile_with(&text, Path::new("/t/p.slint"), "P", &vals).unwrap();
+    assert!(preview::compile_count() - before >= 2);
+}

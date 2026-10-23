@@ -91,3 +91,18 @@ fn values_are_listed_typed_saved_and_bad_ones_report_a_reason() {
     assert_eq!(r[1].2, "7");
     assert_eq!(r[2].2, "こんにちは");
 }
+
+#[test]
+fn changing_the_screen_size_fits_the_whole_screen_in_the_canvas() {
+    let dir = tempfile::tempdir().unwrap();
+    let editor = start(&dir);
+    for (w, h) in [(800, 360), (1280, 720), (360, 640)] {
+        editor.invoke_screen_size_chosen(w, h);
+        slint::platform::update_timers_and_animations();
+        let z = editor.get_zoom_level();
+        let (vw, vh) = (editor.get_canvas_view_w(), editor.get_canvas_view_h());
+        assert!(vw > 100. && vh > 100., "{vw}x{vh}");
+        assert!(w as f32 * z <= vw && h as f32 * z <= vh, "{w}x{h} at {z} in {vw}x{vh}");
+        assert!(editor.get_canvas_pan_x() >= 0. && editor.get_canvas_pan_y() >= 0.);
+    }
+}

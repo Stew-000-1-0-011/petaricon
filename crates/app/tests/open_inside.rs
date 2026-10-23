@@ -242,7 +242,10 @@ fn the_editor_buttons_follow_selection_and_stack() {
     slint::platform::update_timers_and_animations();
 
     assert!(!editor.get_can_open_inside() && !editor.get_can_go_back());
-    editor.invoke_tapped(165., 15.);
+    {
+        let z = editor.get_zoom_level();
+        editor.invoke_tapped(165. * z, 15. * z);
+    }
     assert!(editor.get_can_open_inside());
     editor.invoke_open_inside();
     assert_eq!(editor.get_current_file().as_str(), "remote.slint");
@@ -336,7 +339,10 @@ fn a_pending_property_edit_is_saved_before_a_cross_file_jump() {
     slint::platform::update_timers_and_animations();
     let _ = editor.window().size();
     editor.invoke_choose_component("Main".into());
-    editor.invoke_tapped(165., 15.);
+    {
+        let z = editor.get_zoom_level();
+        editor.invoke_tapped(165. * z, 15. * z);
+    }
     editor.invoke_prop_edited("x".into(), "33".into());
     editor.invoke_open_inside();
     assert_eq!(editor.get_current_file().as_str(), "remote.slint");

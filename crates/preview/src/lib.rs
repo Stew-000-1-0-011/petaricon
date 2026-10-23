@@ -263,6 +263,11 @@ fn text_key(text: &str, path: &Path) -> u64 {
     h.finish()
 }
 
+/// Forgets every remembered verdict (call when any project file changes on disk).
+pub fn clear_verdicts() {
+    VERDICTS.with(|v| v.borrow_mut().clear());
+}
+
 fn verdict_of(key: &VerdictKey) -> Option<Verdict> {
     VERDICTS.with(|v| v.borrow().get(key).cloned())
 }

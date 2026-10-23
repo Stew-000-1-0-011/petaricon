@@ -49,6 +49,9 @@ export component Editor inherits Window {
     // The canvas pan, read by the glue to place new parts in the visible area.
     in-out property <length> canvas-pan-x: 8px;
     in-out property <length> canvas-pan-y: 8px;
+    // The visible canvas area, read by the glue to fit the zoom to the screen size.
+    out property <length> canvas-view-w: cv.width;
+    out property <length> canvas-view-h: cv.height;
     in property <bool> has-guides;
     in property <length> g-x;
     in property <length> g-y;
