@@ -92,3 +92,41 @@ fn root_geometry_is_the_component_root() {
     let root = inst.root_geometry().expect("root geometry");
     assert_eq!((root.rect.x, root.rect.y, root.rect.w, root.rect.h), (0., 0., 200., 100.));
 }
+
+const PARAM: &str = "component P inherits Rectangle { in property <int> n: 1; in property <string> label; in property <bool> on; Rectangle { x: 0px; y: 0px; width: root.on ? root.n * 10px : 5px; height: 10px; } Text { text: root.label; } }";
+
+fn v(n: &str, e: &str) -> (String, String) {
+    (n.to_string(), e.to_string())
+}
+
+#[test]
+fn values_reach_the_component() {
+    i_slint_backend_testing::init_no_event_loop();
+    let b = preview::compile_with(PARAM, Path::new("/t/p.slint"), "P", &[v("n", "4"), v("on", "true")]).unwrap();
+    assert!(b.dropped.is_empty(), "{:?}", b.dropped);
+    let inst = b.compiled.instantiate(200., 100.);
+    let start = PARAM.find("Rectangle {").unwrap() as u32;
+    // `PARAM` starts with `component P inherits Rectangle {`; the child is the second.
+    let start = start + PARAM[start as usize + 1..].find("Rectangle {").unwrap() as u32 + 1;
+    assert_eq!(inst.geometry(start).unwrap().rect.w, 40.);
+}
+
+#[test]
+fn a_bad_value_is_dropped_with_a_reason_and_the_others_apply() {
+    i_slint_backend_testing::init_no_event_loop();
+    let vals = [v("n", "4"), v("on", "true"), v("label", "1 +"), v("missing", "3"), v("n2", "x; } }")];
+    let b = preview::compile_with(PARAM, Path::new("/t/p.slint"), "P", &vals).unwrap();
+    let names: Vec<&str> = b.dropped.iter().map(|d| d.0.as_str()).collect();
+    assert_eq!(names, ["n2", "label", "missing"]);
+    assert!(b.dropped.iter().all(|d| !d.1.is_empty()));
+    let inst = b.compiled.instantiate(200., 100.);
+    let second = PARAM.rfind("Rectangle {").unwrap() as u32;
+    assert_eq!(inst.geometry(second).unwrap().rect.w, 40.);
+}
+
+#[test]
+fn broken_text_still_fails_even_with_values() {
+    i_slint_backend_testing::init_no_event_loop();
+    let text = "component P inherits Rectangle { Text { text: 1 +; } }";
+    assert!(preview::compile_with(text, Path::new("/t/p.slint"), "P", &[v("n", "1")]).is_err());
+}

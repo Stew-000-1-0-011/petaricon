@@ -1,7 +1,7 @@
 import { Palette } from "std-widgets.slint";
 import { Canvas, GuideBand, TidyMark } from "canvas.slint";
-import { BottomPanel, KbBar, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, ExtractDialog, RecoveryDialog, FileActions, FileOpDialog, SettingsSection } from "panels.slint";
-export { TreeRowItem, PropItem, GuideBand, TidyMark }
+import { BottomPanel, KbBar, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, PreviewItem, ExtractDialog, RecoveryDialog, FileActions, FileOpDialog, SettingsSection } from "panels.slint";
+export { TreeRowItem, PropItem, PreviewItem, GuideBand, TidyMark }
 
 export component Editor inherits Window {
     title: "Petaricon Editor";
@@ -39,6 +39,10 @@ export component Editor inherits Window {
     in property <[string]> palette;
     in property <float> zoom-level: 1.0;
     in property <[PropItem]> props;
+    in property <[PreviewItem]> preview-props;
+    // Canvas screen size in px (per component, from .preview).
+    in property <int> screen-w: 360;
+    in property <int> screen-h: 640;
     in property <string> source-title;
     in-out property <string> source-text;
     in-out property <int> panel-tab: 0;
@@ -86,6 +90,9 @@ export component Editor inherits Window {
     callback tree-selected(int /* row */);
     callback tree-action(int /* TreeAction */);
     callback palette-picked(string);
+    // A preview value of a bool property: name (a leading `!` means 偽), set or clear.
+    callback preview-set(string, string);
+    callback screen-size-chosen(int, int);
     callback prop-edited(string, string);
     callback prop-accepted(string, string);
     // The input bar closed because the keyboard went away: apply what was typed.
@@ -313,6 +320,8 @@ export component Editor inherits Window {
         width: root.wide ? root.content-w - root.panel-w : root.content-w;
         height: root.wide ? root.content-h : root.content-h - root.panel-h-eff;
         factory: root.factory;
+        design-w: root.screen-w * 1px;
+        design-h: root.screen-h * 1px;
         popup-hidden: root.want-guide;
         touch-input: root.touch-input;
         has-selection: root.has-selection;
@@ -356,6 +365,11 @@ export component Editor inherits Window {
         tree-rows: root.tree-rows;
         palette: root.palette;
         props: root.props;
+        preview-props: root.preview-props;
+        screen-w: root.screen-w;
+        screen-h: root.screen-h;
+        preview-set(n, v) => { root.preview-set(n, v); }
+        screen-size-chosen(w, h) => { root.screen-size-chosen(w, h); }
         source-title: root.source-title;
         source-text <=> root.source-text;
         touch-input: root.touch-input;

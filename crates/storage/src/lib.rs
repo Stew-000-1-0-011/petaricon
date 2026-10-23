@@ -32,7 +32,151 @@ fn check_setting(key: &str, value: Option<&str>) -> io::Result<()> {
     Ok(())
 }
 
+/// Preview values and screen size of the projects' components; `{project}/.preview`.
+///
+/// One entry per line, fields separated by a tab (lines that do not parse are ignored):
+///
+/// ```text
+/// value<TAB>{file}<TAB>{component}<TAB>{property}<TAB>{Slint expression}
+/// size<TAB>{file}<TAB>{component}<TAB>{width}<TAB>{height}
+/// ```
+const PREVIEW: &str = ".preview";
+
+/// What the preview shows of one component: Slint expressions for its `in` / `in-out`
+/// properties (in the order they were first set) and the screen size in logical pixels.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComponentPreview {
+    pub values: Vec<(String, String)>,
+    pub size: Option<(u32, u32)>,
+}
+
+impl ComponentPreview {
+    pub fn value(&self, name: &str) -> Option<&str> {
+        self.values.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    }
+
+    /// Sets the expression of a property; an empty one removes it.
+    pub fn set_value(&mut self, name: &str, expr: &str) {
+        let expr = clean_expr(expr);
+        self.values.retain(|(n, _)| n != name);
+        if !expr.is_empty() {
+            self.values.push((name.to_string(), expr));
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.values.is_empty() && self.size.is_none()
+    }
+}
+
+/// Newlines and tabs cannot be stored in the line format; they become spaces.
+fn clean_expr(expr: &str) -> String {
+    expr.trim().replace(['\t', '\n', '\r'], " ")
+}
+
+/// The whole `.preview` file: `(file, component)` -> preview.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PreviewConfig {
+    entries: std::collections::BTreeMap<(String, String), ComponentPreview>,
+}
+
+impl PreviewConfig {
+    pub fn parse(text: &str) -> Self {
+        let mut cfg = Self::default();
+        for line in text.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            let [kind, file, comp, a, b] = f[..] else { continue };
+            if file.is_empty() || comp.is_empty() || a.is_empty() {
+                continue;
+            }
+            match kind {
+                "value" if !b.trim().is_empty() && !a.contains(char::is_whitespace) => {
+                    cfg.entry_mut(file, comp).set_value(a, b);
+                }
+                "size" => {
+                    if let (Ok(w), Ok(h)) = (a.parse::<u32>(), b.parse::<u32>())
+                        && (1..=10_000).contains(&w)
+                        && (1..=10_000).contains(&h)
+                    {
+                        cfg.entry_mut(file, comp).size = Some((w, h));
+                    }
+                }
+                _ => {}
+            }
+        }
+        cfg
+    }
+
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for ((file, comp), p) in &self.entries {
+            for (n, v) in &p.values {
+                out += &format!("value\t{file}\t{comp}\t{n}\t{v}\n");
+            }
+            if let Some((w, h)) = p.size {
+                out += &format!("size\t{file}\t{comp}\t{w}\t{h}\n");
+            }
+        }
+        out
+    }
+
+    fn entry_mut(&mut self, file: &str, comp: &str) -> &mut ComponentPreview {
+        self.entries.entry((file.to_string(), comp.to_string())).or_default()
+    }
+
+    pub fn get(&self, file: &str, comp: &str) -> ComponentPreview {
+        self.entries.get(&(file.to_string(), comp.to_string())).cloned().unwrap_or_default()
+    }
+
+    /// Every component of `file` that has something stored.
+    pub fn of_file(&self, file: &str) -> std::collections::BTreeMap<String, ComponentPreview> {
+        self.entries
+            .iter()
+            .filter(|((f, _), _)| f == file)
+            .map(|((_, c), p)| (c.clone(), p.clone()))
+            .collect()
+    }
+
+    pub fn set(&mut self, file: &str, comp: &str, p: ComponentPreview) {
+        let key = (file.to_string(), comp.to_string());
+        if p.is_empty() {
+            self.entries.remove(&key);
+        } else {
+            self.entries.insert(key, p);
+        }
+    }
+
+    fn rename_file(&mut self, old: &str, new: &str) {
+        let moved: Vec<_> = self.entries.keys().filter(|(f, _)| f == old).cloned().collect();
+        for k in moved {
+            if let Some(p) = self.entries.remove(&k) {
+                self.entries.insert((new.to_string(), k.1), p);
+            }
+        }
+    }
+}
+
 pub trait ProjectStore {
+    /// The project's `.preview` (empty when missing, unreadable or corrupt).
+    fn preview_config(&self, _project: &str) -> PreviewConfig {
+        PreviewConfig::default()
+    }
+    fn set_preview_config(&self, _project: &str, _cfg: &PreviewConfig) -> io::Result<()> {
+        Ok(())
+    }
+    /// Stores the preview of one component, keeping everything else in `.preview`.
+    fn set_component_preview(
+        &self,
+        project: &str,
+        file: &str,
+        component: &str,
+        p: &ComponentPreview,
+    ) -> io::Result<()> {
+        let mut cfg = self.preview_config(project);
+        cfg.set(file, component, p.clone());
+        self.set_preview_config(project, &cfg)
+    }
+
     fn projects(&self) -> io::Result<Vec<String>>;
     fn create_project(&self, name: &str) -> io::Result<()>;
     fn files(&self, project: &str) -> io::Result<Vec<String>>;
@@ -138,6 +282,26 @@ fn remove_if_exists(path: &Path) -> io::Result<()> {
 }
 
 impl ProjectStore for LocalStore {
+    fn preview_config(&self, project: &str) -> PreviewConfig {
+        self.project_dir(project)
+            .ok()
+            .and_then(|d| fs::read(d.join(PREVIEW)).ok())
+            .map(|b| PreviewConfig::parse(&String::from_utf8_lossy(&b)))
+            .unwrap_or_default()
+    }
+
+    fn set_preview_config(&self, project: &str, cfg: &PreviewConfig) -> io::Result<()> {
+        let dir = self.project_dir(project)?;
+        let path = dir.join(PREVIEW);
+        let text = cfg.render();
+        if text.is_empty() {
+            return remove_if_exists(&path);
+        }
+        let tmp = dir.join(".preview.tmp");
+        fs::write(&tmp, text)?;
+        fs::rename(&tmp, &path)
+    }
+
     fn location(&self, project: &str, file: &str) -> Option<PathBuf> {
         self.file_path(project, file).ok()
     }
@@ -218,6 +382,9 @@ impl ProjectStore for LocalStore {
         if self.last_open()? == Some((project.to_string(), old.to_string())) {
             self.set_last_open(project, &new)?;
         }
+        let mut cfg = self.preview_config(project);
+        cfg.rename_file(old, &new);
+        let _ = self.set_preview_config(project, &cfg);
         Ok(new)
     }
 
@@ -358,6 +525,39 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = LocalStore::new(dir.path().join("projects")).unwrap();
         (dir, s)
+    }
+
+    #[test]
+    fn preview_roundtrip_and_corrupt_lines_ignored() {
+        let (d, s) = store();
+        s.create_project("p").unwrap();
+        assert_eq!(s.preview_config("p"), PreviewConfig::default());
+        let mut a = ComponentPreview::default();
+        a.set_value("connected", "true");
+        a.set_value("page", "1");
+        a.set_value("name", "\"a b\"");
+        a.size = Some((800, 360));
+        s.set_component_preview("p", "main.slint", "MainWindow", &a).unwrap();
+        let b = ComponentPreview { values: vec![], size: Some((914, 411)) };
+        s.set_component_preview("p", "main.slint", "Other", &b).unwrap();
+        assert_eq!(s.preview_config("p").get("main.slint", "MainWindow"), a);
+        assert_eq!(s.preview_config("p").get("main.slint", "Other"), b);
+        assert_eq!(s.preview_config("p").get("x.slint", "Other"), ComponentPreview::default());
+        // Renaming the file keeps its entries.
+        s.rename_file("p", "main.slint", "m2.slint").unwrap();
+        assert_eq!(s.preview_config("p").get("m2.slint", "MainWindow"), a);
+        // Corrupt lines are skipped, good ones kept.
+        let path = d.path().join("projects/p/.preview");
+        std::fs::write(
+            &path,
+            "garbage\nvalue\tf.slint\tC\tx\t1\nvalue\tf.slint\tC\tbad name\t2\nsize\tf.slint\tC\tabc\t3\nsize\tf.slint\tC\t0\t5\nvalue\tf.slint\n\u{0}\u{ff}",
+        )
+        .unwrap();
+        let c = s.preview_config("p").get("f.slint", "C");
+        assert_eq!(c.values, vec![("x".to_string(), "1".to_string())]);
+        assert_eq!(c.size, None);
+        std::fs::write(&path, [0xff, 0xfe, b'\t', 0, b'\n']).unwrap();
+        assert_eq!(s.preview_config("p"), PreviewConfig::default());
     }
 
     #[test]

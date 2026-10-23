@@ -89,9 +89,59 @@ fn line_col_to_offset(text: &str, line: usize, column: usize) -> Option<usize> {
     Some(line_start + col)
 }
 
-pub fn compile(text: &str, path: &Path, component: &str) -> Result<Compiled, Vec<Diagnostic>> {
+/// Why `expr` cannot be inlined as `name: expr;` into the wrapper (it would escape the
+/// binding), or `None`.
+fn shape_error(expr: &str) -> Option<&'static str> {
+    let mut stack: Vec<char> = Vec::new();
+    let mut in_str = false;
+    let mut chars = expr.chars();
+    while let Some(c) = chars.next() {
+        if in_str {
+            match c {
+                '\\' => {
+                    chars.next();
+                }
+                '"' => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '(' | '[' | '{' => stack.push(c),
+            ')' | ']' | '}' => {
+                let open = match c {
+                    ')' => '(',
+                    ']' => '[',
+                    _ => '{',
+                };
+                if stack.pop() != Some(open) {
+                    return Some("括弧が対応していません");
+                }
+            }
+            ';' if stack.is_empty() => return Some("`;` は使えません"),
+            '\n' | '\r' => return Some("改行は使えません"),
+            _ => {}
+        }
+    }
+    if in_str {
+        return Some("文字列が閉じていません");
+    }
+    if !stack.is_empty() {
+        return Some("括弧が閉じていません");
+    }
+    None
+}
+
+fn build(
+    text: &str,
+    path: &Path,
+    component: &str,
+    values: &[(String, String)],
+) -> Result<Compiled, Vec<Diagnostic>> {
+    let bindings: String = values.iter().map(|(n, v)| format!(" {n}: {v};")).collect();
     let full = format!(
-        "{text}\nexport component {WRAPPER_NAME} inherits Rectangle {{ {component} {{ width: 100%; height: 100%; }} }}\n"
+        "{text}\nexport component {WRAPPER_NAME} inherits Rectangle {{ {component} {{ width: 100%; height: 100%;{bindings} }} }}\n"
     );
     // Source files are matched by path: `..` and symlinks must not make them differ.
     let path = &path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -127,6 +177,59 @@ pub fn compile(text: &str, path: &Path, component: &str) -> Result<Compiled, Vec
             message: format!("component `{component}` not found"),
             offset: None,
         }]),
+    }
+}
+
+pub fn compile(text: &str, path: &Path, component: &str) -> Result<Compiled, Vec<Diagnostic>> {
+    build(text, path, component, &[])
+}
+
+/// The result of `compile_with`: the build, and the values that were left out with the reason.
+pub struct Built {
+    pub compiled: Compiled,
+    pub dropped: Vec<(String, String)>,
+}
+
+/// Compiles with `values` (property name, Slint expression) given to the edited component.
+/// A value that does not compile is dropped (the others still apply) and reported in
+/// `dropped` with the compiler's reason. Fails only when the text itself does not compile.
+pub fn compile_with(
+    text: &str,
+    path: &Path,
+    component: &str,
+    values: &[(String, String)],
+) -> Result<Built, Vec<Diagnostic>> {
+    let mut dropped: Vec<(String, String)> = Vec::new();
+    let mut values_ok: Vec<(String, String)> = Vec::new();
+    for (n, v) in values {
+        match shape_error(v) {
+            Some(r) => dropped.push((n.clone(), r.to_string())),
+            None => values_ok.push((n.clone(), v.clone())),
+        }
+    }
+    if let Ok(compiled) = build(text, path, component, &values_ok) {
+        return Ok(Built { compiled, dropped });
+    }
+    let bare = build(text, path, component, &[])?;
+    let mut keep = Vec::new();
+    for (name, expr) in &values_ok {
+        let one = [(name.clone(), expr.clone())];
+        match build(text, path, component, &one) {
+            Err(e) => dropped.push((name.clone(), e.first().map(|d| d.message.clone()).unwrap_or_default())),
+            Ok(_) => keep.push((name.clone(), expr.clone())),
+        }
+    }
+    if keep.is_empty() {
+        return Ok(Built { compiled: bare, dropped });
+    }
+    match build(text, path, component, &keep) {
+        Ok(compiled) => Ok(Built { compiled, dropped }),
+        Err(e) => {
+            // Each value is fine alone but not together.
+            let why = e.first().map(|d| d.message.clone()).unwrap_or_default();
+            dropped.extend(keep.into_iter().map(|(n, _)| (n, why.clone())));
+            Ok(Built { compiled: bare, dropped })
+        }
     }
 }
 
@@ -203,6 +306,33 @@ impl LiveInstance {
             rect: to_rect(&rect.rect),
             local: to_rect(&rect.local_rect),
         }
+    }
+
+    /// The text of every `Text` item that is currently visible in the window (not hidden by
+    /// `visible: false`, a zero-size clip or an ancestor's clip), in tree order. Shows what the
+    /// preview really displays.
+    pub fn visible_texts(&self) -> Vec<String> {
+        use i_slint_core::items::{ComplexText, ItemRc, SimpleText};
+        let window = i_slint_core::window::WindowInner::from_pub(self.inst.window());
+        let component = window.component();
+        let mut out = Vec::new();
+        let mut stack = vec![ItemRc::new_root(component)];
+        while let Some(item) = stack.pop() {
+            if let Some(next) = item.next_sibling() {
+                stack.push(next);
+            }
+            if item.is_visible() {
+                if let Some(t) = item.downcast::<SimpleText>() {
+                    out.push(SimpleText::FIELD_OFFSETS.text().apply_pin(t.as_pin_ref()).get().to_string());
+                } else if let Some(t) = item.downcast::<ComplexText>() {
+                    out.push(ComplexText::FIELD_OFFSETS.text().apply_pin(t.as_pin_ref()).get().to_string());
+                }
+            }
+            if let Some(child) = item.first_child() {
+                stack.push(child);
+            }
+        }
+        out
     }
 
     fn root(&self) -> ElementRc {

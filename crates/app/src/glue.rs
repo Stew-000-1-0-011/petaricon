@@ -5,14 +5,14 @@ use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use slint_doc::Document;
 use storage::ProjectStore;
 
 use crate::nav::{self, Nav};
-use crate::session::{Corner, Session, TidyReport, TreeAction, TreeRow};
+use crate::session::{Corner, PreviewKind, Session, TidyReport, TreeAction, TreeRow, parse_screen_size};
 use crate::tidy_overlay::{self, MarkKind};
-use crate::{Editor, GuideBand, PropItem, TidyMark, TreeRowItem};
+use crate::{Editor, GuideBand, PreviewItem, PropItem, TidyMark, TreeRowItem};
 
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 4.0;
@@ -43,7 +43,21 @@ pub fn document_path(store: &dyn ProjectStore, project: &str, file: &str) -> Pat
 /// Reads `file` into a new session (no preview yet).
 pub fn load_session(store: &dyn ProjectStore, project: &str, file: &str) -> Result<Session, String> {
     let text = store.read(project, file).map_err(|e| format!("{file}: {e}"))?;
-    Ok(Session::new(Document::new(document_path(store, project, file), text)))
+    let mut session = Session::new(Document::new(document_path(store, project, file), text));
+    session.set_previews(store.preview_config(project).of_file(file));
+    Ok(session)
+}
+
+/// Writes the current component's preview values and screen size to the project's `.preview`.
+pub fn save_preview(
+    store: &dyn ProjectStore,
+    project: &str,
+    file: &str,
+    session: &Session,
+) -> Result<(), String> {
+    store
+        .set_component_preview(project, file, session.component(), &session.preview())
+        .map_err(|e| format!("プレビューの設定を保存できませんでした: {e}"))
 }
 
 /// Saves the open file. Safe to call from platform callbacks on the UI thread (e.g. Android
@@ -224,6 +238,8 @@ pub struct Glue {
     source_view: Option<(usize, String)>,
     /// A property edit waiting for its debounce timer.
     pending_prop: Option<PendingProp>,
+    /// A preview field edit waiting for the same debounce timer.
+    pending_preview: Option<PendingPreview>,
     /// The Source tab text has edits that were not applied; refreshes leave it alone until
     /// the user applies, jumps to the error, or deliberately changes selection/file/component.
     source_dirty: bool,
@@ -246,6 +262,18 @@ pub struct Glue {
     /// The last Tidy, drawn over the canvas until the next edit or selection change.
     tidy_report: Option<TidyReport>,
 }
+
+/// A preview value (or `@size`) edit with the document and component it was typed for.
+struct PendingPreview {
+    doc: (String, String),
+    component: String,
+    /// The property name, or `size`.
+    name: String,
+    value: String,
+}
+
+/// Panel rows whose name starts with this are preview fields, not element properties.
+const PREVIEW_FIELD: char = '@';
 
 /// A property edit with the element and document it was typed for.
 struct PendingProp {
@@ -360,6 +388,43 @@ impl Glue {
         let ed = self.editor();
         ed.set_props(ModelRc::new(VecModel::from(rows)));
         ed.set_props_rev(ed.get_props_rev().wrapping_add(1));
+    }
+
+    /// Shows the preview values and the screen size of the current component. With
+    /// `keep_values` the rows stay as they are (only reasons and the size change), so a field
+    /// being typed in keeps its focus.
+    fn refresh_preview(&self, keep_values: bool) {
+        let ed = self.editor();
+        let rows: Vec<PreviewItem> = self
+            .session
+            .preview_props()
+            .into_iter()
+            .map(|r| PreviewItem {
+                name: r.name.into(),
+                ty: r.ty.into(),
+                is_bool: r.kind == PreviewKind::Bool,
+                value: r.shown.into(),
+                error: r.error.into(),
+            })
+            .collect();
+        let model = ed.get_preview_props();
+        let same_rows = model.row_count() == rows.len()
+            && rows.iter().enumerate().all(|(i, r)| model.row_data(i).is_some_and(|m| m.name == r.name));
+        if keep_values && same_rows {
+            for (i, mut r) in rows.into_iter().enumerate() {
+                if let Some(old) = model.row_data(i) {
+                    r.value = old.value.clone();
+                    if old != r {
+                        model.set_row_data(i, r);
+                    }
+                }
+            }
+        } else {
+            ed.set_preview_props(ModelRc::new(VecModel::from(rows)));
+        }
+        let (w, h) = self.session.screen_size();
+        ed.set_screen_w(w as i32);
+        ed.set_screen_h(h as i32);
     }
 
     fn show_source(&mut self, range: Option<std::ops::Range<usize>>, title: &str) {
@@ -606,6 +671,7 @@ impl Glue {
     fn rebuild_with(&mut self, props: bool, source: bool) {
         self.clear_tidy();
         let factory = self.session.rebuild();
+        self.refresh_preview(!props);
         let ed = self.editor();
         match factory {
             Some(f) => {
@@ -798,6 +864,20 @@ impl Glue {
         }
     }
 
+    /// Queues an edit of a panel field: a preview field (`@name`) or an element property.
+    fn queue_field(&mut self, name: &str, value: &str) -> bool {
+        let Some(preview) = name.strip_prefix(PREVIEW_FIELD) else {
+            return self.queue_prop(name, value);
+        };
+        self.pending_preview = Some(PendingPreview {
+            doc: (self.project.clone(), self.file.clone()),
+            component: self.session.component().to_string(),
+            name: preview.to_string(),
+            value: value.to_string(),
+        });
+        true
+    }
+
     fn queue_prop(&mut self, name: &str, value: &str) -> bool {
         let Some(path) = self.session.selection().cloned() else {
             self.set_error(&crate::session::SessionError::NoSelection.to_string());
@@ -814,7 +894,7 @@ impl Glue {
 
     /// Queues a property edit; it is applied 300 ms after the last keystroke.
     fn prop_edited(&mut self, name: &str, value: &str) {
-        if !self.queue_prop(name, value) {
+        if !self.queue_field(name, value) {
             return;
         }
         let me = self.me.clone();
@@ -825,13 +905,13 @@ impl Glue {
     }
 
     fn prop_accepted(&mut self, name: &str, value: &str) {
-        if self.queue_prop(name, value) {
+        if self.queue_field(name, value) {
             self.commit_prop(true);
         }
     }
 
     fn flush_prop(&mut self) {
-        if self.pending_prop.is_some() {
+        if self.pending_prop.is_some() || self.pending_preview.is_some() {
             self.commit_prop(true);
         }
     }
@@ -839,6 +919,7 @@ impl Glue {
     /// Applies the pending edit unless the selection or the document changed since it was typed.
     fn commit_prop(&mut self, refresh_props: bool) {
         self.prop_timer.stop();
+        self.commit_preview(refresh_props);
         let Some(p) = self.pending_prop.take() else { return };
         if p.doc != (self.project.clone(), self.file.clone())
             || self.session.selection() != Some(&p.path)
@@ -850,6 +931,57 @@ impl Glue {
             Ok(()) => self.rebuild_with(refresh_props, true),
             Err(e) => self.set_error(&e.to_string()),
         }
+    }
+
+    /// Applies the pending preview field edit unless the document or component changed.
+    fn commit_preview(&mut self, refresh: bool) {
+        let Some(p) = self.pending_preview.take() else { return };
+        if p.doc != (self.project.clone(), self.file.clone()) || p.component != self.session.component() {
+            return;
+        }
+        self.clear_feedback();
+        if p.name == "size" {
+            match parse_screen_size(&p.value) {
+                Some(size) => self.session.set_screen_size(size),
+                None => {
+                    // Typing "80" on the way to "800x360" is not worth an error yet.
+                    if refresh {
+                        self.set_error("画面の大きさは 幅x高さ(例 800x360)で入力してください");
+                    }
+                    return;
+                }
+            }
+        } else if !self.session.set_preview_value(&p.name, &p.value) {
+            self.set_error(&format!("{} は in / in-out プロパティではありません", p.name));
+            return;
+        }
+        self.preview_changed(refresh);
+    }
+
+    /// The preview values or size changed: store them and rebuild.
+    fn preview_changed(&mut self, refresh: bool) {
+        if let Err(e) = save_preview(&*self.store, &self.project, &self.file, &self.session) {
+            self.set_error(&e);
+        }
+        self.rebuild_with(false, false);
+        if refresh {
+            self.refresh_preview(false);
+        }
+    }
+
+    /// 真 / 偽 chips: sets (or, for an empty value, clears) the value of a bool property.
+    fn preview_set(&mut self, name: &str, value: &str) {
+        self.begin_action();
+        if self.session.set_preview_value(name, value) {
+            self.preview_changed(true);
+        }
+    }
+
+    /// A screen size chip.
+    fn screen_size_chosen(&mut self, w: i32, h: i32) {
+        self.begin_action();
+        self.session.set_screen_size((w.max(1) as u32, h.max(1) as u32));
+        self.preview_changed(true);
     }
 
     /// Replaces the shown source range of the document with the edited text.
@@ -1252,6 +1384,8 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_prop_edited, |g, n, v| g.prop_edited(&n, &v));
     on!(on_prop_accepted, |g, n, v| g.prop_accepted(&n, &v));
     on!(on_prop_flush, |g| g.flush_prop());
+    on!(on_preview_set, |g, n, v| g.preview_set(&n, &v));
+    on!(on_screen_size_chosen, |g, w, h| g.screen_size_chosen(w, h));
     on!(on_source_apply, |g, t| g.source_apply(&t));
     on!(on_source_edited, |g| g.source_dirty = true);
     on!(on_error_tapped, |g| g.error_tapped());
@@ -1294,6 +1428,7 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
             zoom: 1.0,
             source_view: None,
             pending_prop: None,
+            pending_preview: None,
             source_dirty: false,
             prop_timer: slint::Timer::default(),
             toast_timer: slint::Timer::default(),

@@ -3,7 +3,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use preview::{Diagnostic, Hit, LiveInstance, compile};
+use preview::{Diagnostic, Hit, LiveInstance, compile_with};
+use storage::ComponentPreview;
 use slint_doc::{
     Document, EditError, ElementInfo, ElementKind, ElementPath, LayoutKind, Op, TreeNode,
 };
@@ -115,6 +116,116 @@ fn normalise(kind: PropKind, value: &str) -> String {
             format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
         }
         _ => value.to_string(),
+    }
+}
+
+/// How a preview value is entered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewKind {
+    Bool,
+    Int,
+    Float,
+    Length,
+    Text,
+    /// Anything else: the Slint expression as text.
+    Raw,
+}
+
+impl PreviewKind {
+    fn of(ty: &str) -> Self {
+        match ty {
+            "bool" => Self::Bool,
+            "int" => Self::Int,
+            "float" => Self::Float,
+            "length" => Self::Length,
+            "string" => Self::Text,
+            _ => Self::Raw,
+        }
+    }
+}
+
+/// One `in` / `in-out` property of the edited component, with its preview value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewProp {
+    pub name: String,
+    pub ty: String,
+    pub kind: PreviewKind,
+    /// What the field shows: the Slint expression, except that a plain string literal is
+    /// shown without its quotes. Empty when no value is set.
+    pub shown: String,
+    /// Why the value was left out of the last build; empty when it applies.
+    pub error: String,
+}
+
+/// Screen sizes offered for the canvas (width, height in logical px).
+pub const SCREEN_SIZES: [(u32, u32); 4] = [(360, 640), (800, 360), (914, 411), (1280, 720)];
+pub const DEFAULT_SCREEN: (u32, u32) = SCREEN_SIZES[0];
+
+/// `800x360`, `800×360`, `800 * 360` -> (800, 360).
+pub fn parse_screen_size(text: &str) -> Option<(u32, u32)> {
+    let t = text.trim();
+    let (w, h) = t.split_once(['x', 'X', '×', '*'])?;
+    let (w, h) = (w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?);
+    ((1..=10_000).contains(&w) && (1..=10_000).contains(&h)).then_some((w, h))
+}
+
+/// `in property <T> name ...` / `in-out property <T> name ...` -> `(name, T)`.
+fn public_property(decl: &str) -> Option<(String, String)> {
+    let rest = decl.trim();
+    let rest = rest.strip_prefix("in-out").or_else(|| rest.strip_prefix("in"))?;
+    let rest = rest.trim_start().strip_prefix("property")?.trim_start().strip_prefix('<')?;
+    let mut depth = 1;
+    let mut end = None;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+    let ty = rest[..end].trim().to_string();
+    let name: String = rest[end + 1..]
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some((name, ty))
+}
+
+/// `"abc"` -> `abc` when the expression is exactly one plain string literal.
+fn unquote(expr: &str) -> Option<String> {
+    let inner = expr.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::new();
+    let mut it = inner.chars();
+    while let Some(c) = it.next() {
+        match c {
+            '"' => return None,
+            '\\' => match it.next()? {
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                _ => return None,
+            },
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+fn preview_expr(kind: PreviewKind, input: &str) -> String {
+    let v = input.trim();
+    match kind {
+        PreviewKind::Length if is_bare_number(v) => format!("{v}px"),
+        PreviewKind::Text if !v.is_empty() && !v.starts_with('"') => {
+            format!("\"{}\"", input.replace('\\', "\\\\").replace('"', "\\\""))
+        }
+        _ => v.to_string(),
     }
 }
 
@@ -269,6 +380,10 @@ pub struct Session {
     last_tap: Option<(f32, f32)>,
     pub grid: i32,
     diagnostics: Vec<Diagnostic>,
+    /// Preview values and screen size per component of this file.
+    previews: std::collections::BTreeMap<String, ComponentPreview>,
+    /// `(property, reason)` of the values the last successful build left out.
+    dropped: Vec<(String, String)>,
 }
 
 fn snap(v: f32, grid: i32) -> i32 {
@@ -299,7 +414,75 @@ impl Session {
             last_tap: None,
             grid: 4,
             diagnostics: Vec::new(),
+            previews: Default::default(),
+            dropped: Vec::new(),
         }
+    }
+
+    /// The stored previews of this file's components (before the first `rebuild`).
+    pub fn set_previews(&mut self, previews: std::collections::BTreeMap<String, ComponentPreview>) {
+        self.previews = previews;
+    }
+
+    /// Preview values and size of the current component.
+    pub fn preview(&self) -> ComponentPreview {
+        self.previews.get(&self.component).cloned().unwrap_or_default()
+    }
+
+    /// Screen size of the current component's canvas.
+    pub fn screen_size(&self) -> (u32, u32) {
+        self.preview().size.unwrap_or(DEFAULT_SCREEN)
+    }
+
+    pub fn set_screen_size(&mut self, size: (u32, u32)) {
+        self.previews.entry(self.component.clone()).or_default().size =
+            (size != DEFAULT_SCREEN).then_some(size);
+    }
+
+    /// The `in` / `in-out` properties of the current component with their preview values and
+    /// the reason of any value that was left out of the last build.
+    pub fn preview_props(&self) -> Vec<PreviewProp> {
+        let p = self.preview();
+        let Some(info) = self.doc.components().into_iter().find(|c| c.name == self.component) else {
+            return Vec::new();
+        };
+        info.declarations
+            .iter()
+            .filter_map(|d| public_property(d))
+            .map(|(name, ty)| {
+                let kind = PreviewKind::of(&ty);
+                let expr = p.value(&name).unwrap_or_default();
+                let shown = if kind == PreviewKind::Text {
+                    unquote(expr).unwrap_or_else(|| expr.to_string())
+                } else {
+                    expr.to_string()
+                };
+                let error = self
+                    .dropped
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, r)| r.clone())
+                    .unwrap_or_default();
+                PreviewProp { name, ty, kind, shown, error }
+            })
+            .collect()
+    }
+
+    /// Texts the live preview shows right now (see `LiveInstance::visible_texts`).
+    pub fn visible_texts(&self) -> Vec<String> {
+        self.live.borrow().as_ref().map(|l| l.visible_texts()).unwrap_or_default()
+    }
+
+    /// Sets (an empty input removes) the preview value of a property of the current
+    /// component; `rebuild` applies it. Returns false when it is not an `in` / `in-out`
+    /// property.
+    pub fn set_preview_value(&mut self, name: &str, input: &str) -> bool {
+        let Some(prop) = self.preview_props().into_iter().find(|p| p.name == name) else {
+            return false;
+        };
+        let expr = preview_expr(prop.kind, input);
+        self.previews.entry(self.component.clone()).or_default().set_value(name, &expr);
+        true
     }
 
     pub fn doc(&self) -> &Document {
@@ -347,8 +530,10 @@ impl Session {
     /// together with the instance, when the container runs the factory, so geometry queries
     /// always see an instance and the text it was built from.
     pub fn rebuild(&mut self) -> Option<slint::ComponentFactory> {
-        match compile(self.doc.text(), self.doc.path(), &self.component) {
-            Ok(c) => {
+        match compile_with(self.doc.text(), self.doc.path(), &self.component, &self.preview().values) {
+            Ok(b) => {
+                let c = b.compiled;
+                self.dropped = b.dropped;
                 self.diagnostics.clear();
                 let pending = self.snapshot_doc();
                 let snapshot = self.snapshot.clone();
@@ -372,8 +557,10 @@ impl Session {
 
     /// Compiles and instantiates standalone (for tests).
     pub fn rebuild_standalone(&mut self, width: f32, height: f32) -> bool {
-        match compile(self.doc.text(), self.doc.path(), &self.component) {
-            Ok(c) => {
+        match compile_with(self.doc.text(), self.doc.path(), &self.component, &self.preview().values) {
+            Ok(b) => {
+                let c = b.compiled;
+                self.dropped = b.dropped;
                 self.diagnostics.clear();
                 *self.snapshot.borrow_mut() = self.snapshot_doc();
                 *self.live.borrow_mut() = Some(c.instantiate(width, height));

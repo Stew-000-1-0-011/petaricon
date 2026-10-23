@@ -12,6 +12,16 @@ export struct PropItem {
     value: string,
 }
 
+export struct PreviewItem {
+    name: string,
+    ty: string,
+    // true: shown as 真 / 偽 buttons; false: a text field.
+    is-bool: bool,
+    value: string,
+    // Why the value was left out of the preview; empty when it applies.
+    error: string,
+}
+
 export component ToolButton inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
@@ -32,6 +42,25 @@ export component ToolButton inherits Rectangle {
     }
 }
 
+// A selectable chip, at least 44px tall.
+export component Chip inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked();
+    height: 44px;
+    min-width: 44px;
+    border-radius: 4px;
+    background: root.selected ? #3a6ea5 : ta.pressed ? #4a5058 : #383d44;
+    Text {
+        text: root.text;
+        color: white;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
 // The bottom panel: tab strip and (for now empty) content areas.
 export component BottomPanel inherits Rectangle {
     // Height the panel is dragged to; only used in portrait.
@@ -42,6 +71,12 @@ export component BottomPanel inherits Rectangle {
     in property <[TreeRowItem]> tree-rows;
     in property <[string]> palette;
     in property <[PropItem]> props;
+    in property <[PreviewItem]> preview-props;
+    // Screen size of the canvas, in px.
+    in property <int> screen-w: 360;
+    in property <int> screen-h: 640;
+    callback preview-set(string, string);
+    callback screen-size-chosen(int, int);
     in property <string> source-title;
     in-out property <string> source-text;
     // How far the on-screen keyboard reaches into the bottom of this panel.
@@ -58,7 +93,7 @@ export component BottomPanel inherits Rectangle {
     // 0 up, 1 down, 2 out, 3 in, 4 delete, 5 new container
     callback tree-action(int);
     callback palette-picked(string);
-    property <[string]> tab-names: ["Tree", "Parts", "Props", "Source"];
+    property <[string]> tab-names: ["Tree", "Parts", "Props", "Source", "プレビュー"];
     property <length> start-y;
     property <length> start-h;
 
@@ -237,6 +272,168 @@ export component BottomPanel inherits Rectangle {
                     clicked => { root.source-apply(src.text); }
                 }
             }
+            if root.tab == 4: Flickable {
+                content-height: pv.preferred-height;
+                pv := VerticalLayout {
+                    padding: 6px;
+                    spacing: 4px;
+                    Text { text: "画面の大きさ"; color: #9aa3ad; font-size: 12px; height: 20px; }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        height: 44px;
+                        for size[i] in [[360, 640], [800, 360], [914, 411], [1280, 720]]: Chip {
+                            horizontal-stretch: 1;
+                            text: "\{size[0]}×\{size[1]}";
+                            selected: root.screen-w == size[0] && root.screen-h == size[1];
+                            clicked => { root.screen-size-chosen(size[0], size[1]); }
+                        }
+                    }
+                    size-row := Rectangle {
+                        height: 44px;
+                        Text {
+                            x: 2px;
+                            width: 38%;
+                            text: "自由入力 (幅x高さ)";
+                            color: white;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        if root.touch-input: Rectangle {
+                            x: parent.width * 0.4;
+                            y: 2px;
+                            width: parent.width - self.x;
+                            height: 40px;
+                            background: #2a2e33;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #4a5058;
+                            Text {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                text: "\{root.screen-w}x\{root.screen-h}";
+                                color: white;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                            TouchArea {
+                                clicked => { root.value-focused("@size", "\{root.screen-w}x\{root.screen-h}", size-row.absolute-position.y + size-row.height); }
+                            }
+                        }
+                        if !root.touch-input: LineEdit {
+                            x: parent.width * 0.4;
+                            y: 2px;
+                            width: parent.width - self.x;
+                            height: 40px;
+                            text: "\{root.screen-w}x\{root.screen-h}";
+                            changed has-focus => {
+                                if self.has-focus {
+                                    root.value-focused("@size", self.text, size-row.absolute-position.y + size-row.height);
+                                } else {
+                                    root.value-blurred();
+                                }
+                            }
+                            edited(t) => { root.prop-edited("@size", t); }
+                            accepted(t) => { root.prop-accepted("@size", t); }
+                        }
+                    }
+                    Text {
+                        text: "プレビュー用の値 (in / in-out プロパティ。.slint には書きません)";
+                        color: #9aa3ad;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    if root.preview-props.length == 0: Text {
+                        text: "この部品に in / in-out プロパティはありません";
+                        color: #8a9199;
+                        font-size: 13px;
+                        height: 44px;
+                        vertical-alignment: center;
+                    }
+                    for p in root.preview-props: prow := Rectangle {
+                        height: p.error == "" ? 44px : 44px + errtext.preferred-height + 4px;
+                        Text {
+                            x: 2px;
+                            y: 0px;
+                            width: 38%;
+                            height: 44px;
+                            text: p.name + "\n" + p.ty;
+                            color: p.value == "" ? #8a9199 : white;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        if p.is-bool: HorizontalLayout {
+                            x: parent.width * 0.4;
+                            y: 0px;
+                            width: parent.width - self.x;
+                            height: 44px;
+                            spacing: 4px;
+                            Chip {
+                                horizontal-stretch: 1;
+                                text: "真";
+                                selected: p.value == "true";
+                                clicked => { root.preview-set(p.name, p.value == "true" ? "" : "true"); }
+                            }
+                            Chip {
+                                horizontal-stretch: 1;
+                                text: "偽";
+                                selected: p.value == "false";
+                                clicked => { root.preview-set(p.name, p.value == "false" ? "" : "false"); }
+                            }
+                        }
+                        if !p.is-bool && root.touch-input: Rectangle {
+                            x: parent.width * 0.4;
+                            y: 2px;
+                            width: parent.width - self.x;
+                            height: 40px;
+                            background: #2a2e33;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: p.error == "" ? #4a5058 : #e57373;
+                            Text {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                text: p.value;
+                                color: white;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            TouchArea {
+                                clicked => { root.value-focused("@" + p.name, p.value, prow.absolute-position.y + 44px); }
+                            }
+                        }
+                        if !p.is-bool && !root.touch-input: LineEdit {
+                            x: parent.width * 0.4;
+                            y: 2px;
+                            width: parent.width - self.x;
+                            height: 40px;
+                            text: p.value;
+                            placeholder-text: p.ty;
+                            changed has-focus => {
+                                if self.has-focus {
+                                    root.value-focused("@" + p.name, self.text, prow.absolute-position.y + 44px);
+                                } else {
+                                    root.value-blurred();
+                                }
+                            }
+                            edited(t) => { root.prop-edited("@" + p.name, t); }
+                            accepted(t) => { root.prop-accepted("@" + p.name, t); }
+                        }
+                        errtext := Text {
+                            x: 2px;
+                            y: 44px;
+                            width: parent.width - 4px;
+                            visible: p.error != "";
+                            text: "反映されません: " + p.error;
+                            color: #e57373;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -369,25 +566,6 @@ export component KbBar inherits Rectangle {
             clicked => { root.accepted(root.text); }
         }
     }
-}
-
-// A selectable chip, at least 44px tall.
-export component Chip inherits Rectangle {
-    in property <string> text;
-    in property <bool> selected;
-    callback clicked();
-    height: 44px;
-    min-width: 44px;
-    border-radius: 4px;
-    background: root.selected ? #3a6ea5 : ta.pressed ? #4a5058 : #383d44;
-    Text {
-        text: root.text;
-        color: white;
-        font-size: 13px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    ta := TouchArea { clicked => { root.clicked(); } }
 }
 
 // Dimmed full-window backdrop with a centred card; swallows all taps.
