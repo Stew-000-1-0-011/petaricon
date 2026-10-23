@@ -143,3 +143,19 @@ fn stored_values_for_undeclared_properties_are_never_compiled() {
     assert_eq!(preview::compile_count() - n0, 1);
     assert!(s.preview_props().iter().all(|p| p.error.is_empty()));
 }
+
+#[test]
+fn tapping_the_manual_panel_selects_it_not_the_hidden_leave_dialog() {
+    let mut s = main_window();
+    s.set_preview_value("connected", "true");
+    s.set_preview_value("page", "1");
+    assert!(s.rebuild_standalone(800., 360.), "{:?}", s.diagnostics());
+    assert!(shows(&s, "並進"));
+    // The full-screen LeaveDialog is last in the tree but `visible: false`.
+    let hit = s.tap(400., 180.);
+    assert!(hit.is_some());
+    match s.selected_use() {
+        Some(app::session::UseTarget::Imported { component, .. }) => assert_eq!(component, "ManualPanel"),
+        other => panic!("{other:?}"),
+    }
+}

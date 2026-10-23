@@ -177,3 +177,15 @@ fn clearing_verdicts_makes_a_known_bad_value_be_tried_again() {
     preview::compile_with(&text, Path::new("/t/p.slint"), "P", &vals).unwrap();
     assert!(preview::compile_count() - before >= 2);
 }
+
+#[test]
+fn hits_skip_elements_that_are_not_visible() {
+    i_slint_backend_testing::init_no_event_loop();
+    let src = "export component A inherits Rectangle {\n  Rectangle { x: 0px; y: 0px; width: 100px; height: 100px; }\n  Rectangle { x: 0px; y: 0px; width: 100px; height: 100px; visible: false; Rectangle { x: 10px; y: 10px; width: 20px; height: 20px; } }\n}";
+    let c = compile(src, Path::new("/t/a.slint"), "A").unwrap();
+    let inst = c.instantiate(200., 200.);
+    let first = (src.find("{\n").unwrap() + src[src.find("{\n").unwrap()..].find("Rectangle {").unwrap()) as u32;
+    let hits = inst.hits_at(15., 15.);
+    assert_eq!(hits[0].start, first, "{hits:?}");
+    assert_eq!(hits.len(), 1);
+}

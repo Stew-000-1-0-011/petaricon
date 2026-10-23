@@ -52,6 +52,8 @@ export component Editor inherits Window {
     // The visible canvas area, read by the glue to fit the zoom to the screen size.
     out property <length> canvas-view-w: cv.width;
     out property <length> canvas-view-h: cv.height;
+    changed canvas-view-w => { root.view-changed(); }
+    changed canvas-view-h => { root.view-changed(); }
     in property <bool> has-guides;
     in property <length> g-x;
     in property <length> g-y;
@@ -90,6 +92,8 @@ export component Editor inherits Window {
     callback create-project(string);
     callback choose-component(string);
     callback zoom(float /* multiplier */);
+    // The visible canvas area changed size (window resize, panel drag, first layout).
+    callback view-changed();
     callback tree-selected(int /* row */);
     callback tree-action(int /* TreeAction */);
     callback palette-picked(string);

@@ -539,11 +539,20 @@ impl LiveInstance {
     fn own_hit(&self, e: &ElementRc, p: i_slint_core::lengths::LogicalPoint) -> Option<Hit> {
         let start = self.own_start(e)?;
         let rect = self
-            .inst
-            .element_positions(e)
+            .shown_positions(e)
             .into_iter()
             .find(|r| r.contains(p))?;
         Some(Self::hit_for(&rect, start))
+    }
+
+    /// Positions of `e` that are really visible: not hidden by `visible: false` on the element
+    /// or an ancestor, and not clipped away. Hit-testing uses this so that a hidden full-screen
+    /// dialog never captures a tap meant for what is shown below it.
+    fn shown_positions(&self, e: &ElementRc) -> Vec<HighlightedRect> {
+        use slint_interpreter::highlight::{ElementPositionFilter, element_positions};
+        use slint_interpreter::ComponentHandle;
+        let inst = self.inst.clone_strong().into();
+        element_positions(&inst, e, ElementPositionFilter::ExcludeClipped)
     }
 
     /// Geometry of the edited component's root element (which has no source start of its own

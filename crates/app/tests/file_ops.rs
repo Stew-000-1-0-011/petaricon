@@ -45,9 +45,13 @@ fn fresh(dir: &tempfile::TempDir) -> LocalStore {
 
 /// Selects the box and drags it, leaving the document dirty.
 fn make_dirty(editor: &app::Editor) {
-    editor.invoke_tapped(60., 60.);
+    {
+        let z = editor.get_zoom_level();
+        editor.invoke_tapped(60. * z, 60. * z);
+    }
     assert!(editor.get_has_selection());
-    editor.invoke_drag_finished(40., 40.);
+    let z = editor.get_zoom_level();
+    editor.invoke_drag_finished(40. * z, 40. * z);
     assert!(editor.get_dirty());
 }
 

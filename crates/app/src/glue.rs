@@ -234,6 +234,9 @@ pub struct Glue {
     file: String,
     session: Session,
     zoom: f32,
+    /// The zoom should still be fitted to the screen once the canvas has a size (set when a
+    /// file is shown; cleared by fitting or by the user zooming).
+    fit_pending: bool,
     /// False when the file could not be read; saving is refused then.
     loaded: bool,
     /// Start and text of the range the Source tab shows, as it is in the document.
@@ -719,6 +722,8 @@ impl Glue {
         self.file_shown();
         self.editor().set_has_selection(false);
         self.rebuild();
+        self.fit_pending = true;
+        self.fit_zoom();
         self.check_recovery();
     }
 
@@ -1002,6 +1007,7 @@ impl Glue {
         if vw <= margin * 2.0 || vh <= margin * 2.0 {
             return;
         }
+        self.fit_pending = false;
         let z = ((vw - margin) / w.max(1) as f32).min((vh - margin) / h.max(1) as f32);
         self.zoom = z.clamp(MIN_ZOOM, MAX_ZOOM);
         ed.set_zoom_level(self.zoom);
@@ -1038,6 +1044,7 @@ impl Glue {
 
     fn zoom_by(&mut self, m: f32) {
         self.begin_action();
+        self.fit_pending = false;
         self.zoom = (self.zoom * m).clamp(MIN_ZOOM, MAX_ZOOM);
         self.editor().set_zoom_level(self.zoom);
     }
@@ -1392,6 +1399,16 @@ fn connect(editor: &Editor, glue: &Shared) {
             });
         }};
     }
+    {
+        let glue = glue.clone();
+        editor.on_view_changed(move || {
+            if let Ok(mut g) = glue.try_borrow_mut()
+                && g.fit_pending
+            {
+                g.fit_zoom();
+            }
+        });
+    }
     on!(on_open_inside, |g| g.navigate(false));
     on!(on_go_back, |g| g.navigate(true));
     on!(on_tapped, |g, x, y| g.tapped(x, y));
@@ -1452,6 +1469,7 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
             file,
             session,
             zoom: 1.0,
+            fit_pending: true,
             source_view: None,
             pending_prop: None,
             pending_preview: None,

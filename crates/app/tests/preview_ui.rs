@@ -106,3 +106,18 @@ fn changing_the_screen_size_fits_the_whole_screen_in_the_canvas() {
         assert!(editor.get_canvas_pan_x() >= 0. && editor.get_canvas_pan_y() >= 0.);
     }
 }
+
+#[test]
+fn a_remembered_size_is_fitted_when_the_editor_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let editor = start(&dir);
+        editor.invoke_screen_size_chosen(1280, 720);
+    }
+    let editor = start(&dir);
+    slint::platform::update_timers_and_animations();
+    let (vw, vh) = (editor.get_canvas_view_w(), editor.get_canvas_view_h());
+    let z = editor.get_zoom_level();
+    assert!(z < 1.0, "zoom {z}");
+    assert!(1280. * z <= vw && 720. * z <= vh, "{z} in {vw}x{vh}");
+}
