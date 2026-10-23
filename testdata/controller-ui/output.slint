@@ -1,0 +1,170 @@
+import { Theme, ScreenState } from "theme.slint";
+import { MapPane } from "map.slint";
+import { ConsolePanel } from "console.slint";
+import { Btn } from "manual.slint";
+
+export struct WheelInfo { text: string, ok: bool }
+
+component Cell inherits Text {
+    color: Theme.text;
+    font-size: 14px;
+    overflow: elide;
+    vertical-alignment: center;
+}
+
+// Status band (one line: position, velocity, wheel voltages, mode), the map on the left and
+// the console on the right. With the keyboard up the console covers the whole screen.
+export component OutputScreen inherits Rectangle {
+    background: Theme.bg;
+    init => { ScreenState.output-active = root.visible; }
+    changed visible => { ScreenState.output-active = root.visible; }
+
+    in property <string> pose-text: "位置 -";
+    in property <string> vel-text: "速度 -";
+    in property <[WheelInfo]> wheels;
+    in property <string> mode-text;
+    in property <color> mode-color: Theme.dim;
+    in property <string> reason-text;
+    // Connected to the in-app demo robot.
+    in property <bool> demo;
+    // Window height; the keyboard takes about 55% of it (keys stay at least 32px).
+    in property <length> window-height: 640px;
+
+    in property <image> map-image;
+    in property <float> map-cx;
+    in property <float> map-cy;
+    in property <float> map-scale: 50;
+
+    callback map-geometry(length, length);
+    callback map-panned(length, length);
+    callback map-zoomed(float, length, length);
+    callback map-fit();
+
+    // 地図で姿勢を指定: banner while picking, confirmation once a pose was picked.
+    in property <bool> pose-pick: false;
+    in property <string> confirm-text;
+    in property <bool> confirm-active: false;
+    callback pose-dragging(float, float, float);
+    callback pose-picked(float, float, float);
+    callback pose-cancelled();
+    callback pose-confirm();
+    callback pose-quit();
+
+    // The console takes the whole screen while the keyboard is up (the map is hidden), except
+    // while a pose is being picked on the map.
+    property <bool> console-wide: con.keyboard-visible && !root.pose-pick;
+    property <length> map-w: root.width * 0.55;
+    property <length> body-h: root.height - Theme.band-h;
+
+    // Status band: one line; what does not fit is elided.
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: Theme.band-h;
+        background: Theme.panel;
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 10px;
+            spacing: 12px;
+            Cell { text: root.pose-text; }
+            Cell { text: root.vel-text; }
+            HorizontalLayout {
+                spacing: 8px;
+                Cell { text: "車輪"; color: Theme.dim; horizontal-stretch: 0; }
+                for w[i] in root.wheels: Cell {
+                    text: w.text;
+                    color: w.ok ? Theme.text : Theme.danger;
+                    font-weight: w.ok ? 400 : 700;
+                }
+            }
+            Cell { text: root.reason-text; color: Theme.warn; }
+            if root.demo: Rectangle {
+                width: 44px;
+                height: 20px;
+                y: (parent.height - self.height) / 2;
+                background: Theme.demo;
+                border-radius: 4px;
+                Text { text: "デモ"; color: #000000; font-size: 13px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+            }
+            Cell { text: root.mode-text; color: root.mode-color; font-weight: 700; horizontal-stretch: 0; }
+        }
+    }
+
+    // Map (left), with the pose-pick banners over it.
+    Rectangle {
+        x: 0;
+        y: Theme.band-h;
+        width: root.map-w;
+        height: root.body-h;
+        visible: !root.console-wide;
+        MapPane {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            pane-id: 0;
+            pose-pick-enabled: root.pose-pick && !root.confirm-active;
+            image: root.map-image;
+            view-cx: root.map-cx;
+            view-cy: root.map-cy;
+            view-scale: root.map-scale;
+            geometry(w, h) => { root.map-geometry(w, h); }
+            panned(dx, dy) => { root.map-panned(dx, dy); }
+            zoomed(f, x, y) => { root.map-zoomed(f, x, y); }
+            fit-pressed => { root.map-fit(); }
+            pose-dragging(x, y, yaw) => { root.pose-dragging(x, y, yaw); }
+            pose-picked(x, y, yaw) => { root.pose-picked(x, y, yaw); }
+            pose-cancelled => { root.pose-cancelled(); }
+        }
+        if root.pose-pick && !root.confirm-active: Rectangle {
+            x: 8px;
+            y: 8px;
+            width: parent.width - 16px;
+            height: 52px;
+            background: #12161cf0;
+            border-radius: 8px;
+            border-width: 2px;
+            border-color: Theme.accent;
+            TouchArea { }
+            HorizontalLayout {
+                padding: 4px;
+                padding-left: 10px;
+                spacing: 8px;
+                Text { text: "長押しして向きへドラッグ"; color: Theme.text; font-size: 16px; font-weight: 700; vertical-alignment: center; overflow: elide; }
+                Btn { label: "やめる"; min-width: 80px; max-width: 96px; clicked => { root.pose-quit(); } }
+            }
+        }
+        if root.pose-pick && root.confirm-active: Rectangle {
+            x: 8px;
+            y: 8px;
+            width: parent.width - 16px;
+            height: 100px;
+            background: #12161cf0;
+            border-radius: 8px;
+            border-width: 2px;
+            border-color: Theme.accent;
+            TouchArea { }
+            VerticalLayout {
+                padding: 6px;
+                spacing: 4px;
+                Text { text: root.confirm-text; color: Theme.text; font-size: 15px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Btn { label: "決定"; active: true; tint: Theme.ok; clicked => { root.pose-confirm(); } }
+                    Btn { label: "やめる"; clicked => { root.pose-quit(); } }
+                }
+            }
+        }
+    }
+
+    con := ConsolePanel {
+        x: root.console-wide ? 0px : root.map-w;
+        y: root.console-wide ? 0px : Theme.band-h;
+        width: root.console-wide ? root.width : root.width - root.map-w;
+        height: root.console-wide ? root.height : root.body-h;
+        kbd-height: max(root.window-height * 0.55, 206px);
+        // Little room left above the keyboard: drop the quick-command row.
+        compact: self.height - self.kbd-height < 230px;
+    }
+}

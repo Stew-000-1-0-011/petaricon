@@ -1,0 +1,107 @@
+import { Theme } from "theme.slint";
+
+component TabButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+    min-height: 44px;
+    background: root.active ? Theme.accent : Theme.panel;
+    border-radius: 8px;
+    Text {
+        text: root.label;
+        color: Theme.text;
+        font-size: 15px;
+        font-weight: root.active ? 700 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+// The right-edge strip: page switch, link status, emergency stop / release.
+// The parent places it inside the safe area.
+export component EdgeStrip inherits Rectangle {
+    // 0 output, 1 manual, 2 auto
+    in-out property <int> page;
+    // Link status text ("接続中", "切断" ...) and its colour.
+    in property <string> conn-text;
+    in property <color> conn-color: Theme.dim;
+    // Round-trip delay in ms; negative means unknown.
+    in property <int> rtt-ms: -1;
+    // True while the phone latch or the robot is stopped: the button becomes "解除".
+    in property <bool> stopped;
+    // Robot mode text ("手動" / "自動" / "停止"), empty when unknown.
+    in property <string> mode-text;
+    // Connected to the in-app demo robot, not a real one.
+    in property <bool> demo;
+    // Show the 接続先 button (connected pages only).
+    in property <bool> connected;
+    callback disconnect-pressed();
+    callback stop-pressed();
+    callback release-pressed();
+
+    background: Theme.bg;
+    VerticalLayout {
+        padding: 4px;
+        spacing: 4px;
+        TabButton { label: "出力"; active: root.page == 0; clicked => { root.page = 0; } }
+        TabButton { label: "手動"; active: root.page == 1; clicked => { root.page = 1; } }
+        TabButton { label: "自動"; active: root.page == 2; clicked => { root.page = 2; } }
+        Rectangle {
+            VerticalLayout {
+                alignment: center;
+                if root.demo: Rectangle {
+                    height: 22px;
+                    background: Theme.demo;
+                    border-radius: 6px;
+                    Text { text: "デモ"; color: #000000; font-size: 14px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                spacing: 1px;
+                Text {
+                    text: root.conn-text;
+                    color: root.conn-color;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: root.rtt-ms >= 0 ? root.rtt-ms + " ms" : "- ms";
+                    color: Theme.text;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: root.mode-text;
+                    color: root.stopped ? Theme.warn : Theme.ok;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+        if root.connected: Rectangle {
+            height: 44px;
+            background: Theme.panel;
+            border-radius: 8px;
+            Text { text: "接続先"; color: Theme.text; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+            TouchArea { clicked => { root.disconnect-pressed(); } }
+        }
+        Rectangle {
+            min-height: 64px;
+            background: root.stopped ? Theme.warn : Theme.danger;
+            border-radius: 10px;
+            Text {
+                text: root.stopped ? "解除" : "全停止";
+                color: root.stopped ? #000000 : #ffffff;
+                font-size: 18px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            TouchArea {
+                clicked => {
+                    if root.stopped { root.release-pressed(); } else { root.stop-pressed(); }
+                }
+            }
+        }
+    }
+}

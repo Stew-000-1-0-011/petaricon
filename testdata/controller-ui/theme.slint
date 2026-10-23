@@ -1,0 +1,26 @@
+// Shared colours and sizes. Tap targets are at least `tap` (44px).
+// Whether the output screen (console and keyboard) is showing. Hidden screens stay alive, and
+// a TouchArea keeps `pressed` while hidden, so held-key timers must also check this.
+export global ScreenState {
+    in-out property <bool> output-active: true;
+}
+
+export global Theme {
+    out property <length> tap: 48px;
+    out property <length> strip-width: 84px;
+    out property <color> bg: #12161c;
+    out property <color> panel: #1c222b;
+    // Plate for overlays: ~0.9 alpha, so the map shows faintly through but its text does not ghost.
+    out property <color> plate: #232b36e6;
+    out property <color> panel-hi: #2a3340;
+    out property <color> text: #e8edf3;
+    out property <color> dim: #8d99a8;
+    out property <color> accent: #3d8bfd;
+    out property <color> ok: #3fb950;
+    out property <color> warn: #d9a21b;
+    out property <color> danger: #d1342f;
+    out property <color> demo: #e056fd;
+    out property <length> font: 16px;
+    // Height of the one-line status band at the top of the output screen.
+    out property <length> band-h: 32px;
+}
