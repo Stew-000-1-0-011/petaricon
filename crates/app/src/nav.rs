@@ -38,7 +38,7 @@ impl Nav {
 pub type Loader<'a> = &'a dyn Fn(&str) -> Result<Session, String>;
 
 /// A file name from an `import` path, when it names a file of the (flat) project.
-fn project_file(store: &dyn ProjectStore, project: &str, path: &str) -> Result<String, String> {
+pub fn project_file(store: &dyn ProjectStore, project: &str, path: &str) -> Result<String, String> {
     let name = path.strip_prefix("./").unwrap_or(path);
     let known = !name.contains('/') && store.files(project).is_ok_and(|f| f.iter().any(|x| x == name));
     if known {
@@ -62,6 +62,8 @@ fn save_open(
     Ok(())
 }
 
+/// Undo history of a file that is left for another file is not kept (the file is saved and
+/// reloaded when returned to); same-file jumps keep the session.
 /// Opens the definition of the selected component use: the same file switches the edited
 /// component, another file (found through the `import`) is saved-for and opened. The place left
 /// is pushed for `go_back`. Nothing changes on an error (unsaved edits may have been saved).
@@ -81,7 +83,11 @@ pub fn open_inside(
         selection: session.selection().cloned(),
     };
     match target {
-        UseTarget::Local(name) => session.set_component(&name),
+        UseTarget::Local(name) => {
+            // The session (and its undo history) stays; the file is saved anyway.
+            save_open(store, project, file, session, loaded)?;
+            session.set_component(&name);
+        }
         UseTarget::Imported { path, component } => {
             let other = project_file(store, project, &path)?;
             save_open(store, project, file, session, loaded)?;
@@ -109,10 +115,19 @@ pub fn go_back(
     load: Loader,
 ) -> Result<(), String> {
     let frame = nav.stack.last().cloned().ok_or("戻る先がありません")?;
+    save_open(store, project, file, session, loaded)?;
     if frame.file != *file {
-        save_open(store, project, file, session, loaded)?;
-        *session = load(&frame.file)?;
-        *file = frame.file.clone();
+        match load(&frame.file) {
+            Ok(s) => {
+                *session = s;
+                *file = frame.file.clone();
+            }
+            Err(e) => {
+                // The place is gone: drop it so 「戻る」 is not stuck on it.
+                nav.stack.pop();
+                return Err(format!("{} に戻れません: {e}", frame.file));
+            }
+        }
     }
     session.set_component(&frame.component);
     if let Some(sel) = frame.selection {

@@ -285,3 +285,61 @@ fn nonnormalized_and_symlinked_paths_still_have_geometry() {
         assert!(s.selection_hit().is_some(), "{rel}");
     }
 }
+
+#[test]
+fn same_file_jump_and_return_save_the_file() {
+    let mut f = fixture();
+    f.session.tap(15., 15.);
+    f.session.move_selection(8., 8.).unwrap();
+    let edited = f.session.doc().text().to_string();
+    open_inside(&f.store, "p", &mut f.file, &mut f.session, true, &mut f.nav, &|a| load(&f.store, a)).unwrap();
+    assert_eq!(f.store.read("p", "main.slint").unwrap(), edited);
+    assert!(!f.session.doc().is_dirty());
+    assert!(f.session.undo(), "history is kept in the same file");
+    go_back(&f.store, "p", &mut f.file, &mut f.session, true, &mut f.nav, &|a| load(&f.store, a)).unwrap();
+    assert_eq!(f.store.read("p", "main.slint").unwrap(), f.session.doc().text());
+}
+
+#[test]
+fn back_to_a_vanished_file_drops_the_frame() {
+    let mut f = fixture();
+    f.session.tap(165., 15.);
+    open_inside(&f.store, "p", &mut f.file, &mut f.session, true, &mut f.nav, &|a| load(&f.store, a)).unwrap();
+    std::fs::remove_file(f._dir.path().join("p/main.slint")).unwrap();
+    let r = go_back(&f.store, "p", &mut f.file, &mut f.session, true, &mut f.nav, &|a| load(&f.store, a));
+    assert!(r.is_err());
+    assert!(f.nav.is_empty());
+    assert_eq!(f.file, "remote.slint");
+}
+
+#[test]
+fn std_widgets_uses_are_not_openable() {
+    let _ = std::panic::catch_unwind(i_slint_backend_testing::init_no_event_loop);
+    let src = "import { Button } from \"std-widgets.slint\";\nexport component Main inherits Rectangle { Button { } }\n";
+    let mut s = Session::new(slint_doc::Document::new("/t/m.slint".into(), src.into()));
+    s.select_path(path("Main", &[0]));
+    assert!(s.selected_use().is_none());
+}
+
+#[test]
+fn a_pending_property_edit_is_saved_before_a_cross_file_jump() {
+    i_slint_backend_testing::init_no_event_loop();
+    let dir = tempfile::tempdir().unwrap();
+    let store = LocalStore::new(dir.path().to_path_buf()).unwrap();
+    store.create_project("p").unwrap();
+    store.write("p", "main.slint", MAIN).unwrap();
+    store.write("p", "remote.slint", REMOTE).unwrap();
+    let editor = app::Editor::new().unwrap();
+    app::glue::start(&editor, Box::new(store)).unwrap();
+    editor.window().set_size(slint::LogicalSize::new(480., 800.));
+    editor.show().unwrap();
+    slint::platform::update_timers_and_animations();
+    let _ = editor.window().size();
+    editor.invoke_choose_component("Main".into());
+    editor.invoke_tapped(165., 15.);
+    editor.invoke_prop_edited("x".into(), "33".into());
+    editor.invoke_open_inside();
+    assert_eq!(editor.get_current_file().as_str(), "remote.slint");
+    let saved = std::fs::read_to_string(dir.path().join("p/main.slint")).unwrap();
+    assert!(saved.contains("x: 33px;"), "{saved}");
+}

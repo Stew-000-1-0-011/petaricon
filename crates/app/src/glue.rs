@@ -412,7 +412,12 @@ impl Glue {
     pub fn update_overlay(&self) {
         self.refresh_tree();
         let ed = self.editor();
-        ed.set_can_open_inside(self.session.selected_use().is_some());
+        ed.set_can_open_inside(match self.session.selected_use() {
+            Some(crate::session::UseTarget::Imported { path, .. }) => {
+                nav::project_file(&*self.store, &self.project, &path).is_ok()
+            }
+            other => other.is_some(),
+        });
         ed.set_can_go_back(!self.nav.is_empty());
         match self.session.selection_hit() {
             Some(hit) => {
@@ -643,13 +648,18 @@ impl Glue {
         self.project = project.to_string();
         self.file = file.to_string();
         self.session = session;
-        self.loaded = true;
-        self.last_recovery = None;
-        let _ = self.store.set_last_open(project, file);
-        self.refresh_lists();
+        self.file_shown();
         self.editor().set_has_selection(false);
         self.rebuild();
         self.check_recovery();
+    }
+
+    /// Bookkeeping after the open file changed.
+    fn file_shown(&mut self) {
+        self.loaded = true;
+        self.last_recovery = None;
+        let _ = self.store.set_last_open(&self.project, &self.file);
+        self.refresh_lists();
     }
 
     /// 「中を開く」 / 「戻る」: runs `jump` (which may replace the session and file), then
@@ -671,10 +681,7 @@ impl Glue {
             return;
         }
         if self.file != old_file {
-            self.loaded = true;
-            self.last_recovery = None;
-            let _ = self.store.set_last_open(&project, &self.file);
-            self.refresh_lists();
+            self.file_shown();
             self.rebuild();
             self.check_recovery();
         } else {

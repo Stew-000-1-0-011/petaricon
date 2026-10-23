@@ -464,6 +464,11 @@ impl Session {
             return Some(UseTarget::Local(name));
         }
         self.doc.imports().into_iter().find_map(|i| {
+            // Only files of the project can be opened (not std-widgets or subfolders).
+            let file = i.path.strip_prefix("./").unwrap_or(&i.path);
+            if !file.ends_with(".slint") || file.contains('/') || file == "std-widgets.slint" {
+                return None;
+            }
             let (external, _) = i.names.into_iter().find(|(_, internal)| *internal == name)?;
             Some(UseTarget::Imported { path: i.path, component: external })
         })
