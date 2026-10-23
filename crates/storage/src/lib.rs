@@ -69,6 +69,13 @@ impl ComponentPreview {
     }
 }
 
+/// Slint identifier: the only form a stored property name may take.
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Newlines and tabs cannot be stored in the line format; they become spaces.
 fn clean_expr(expr: &str) -> String {
     expr.trim().replace(['\t', '\n', '\r'], " ")
@@ -90,7 +97,7 @@ impl PreviewConfig {
                 continue;
             }
             match kind {
-                "value" if !b.trim().is_empty() && !a.contains(char::is_whitespace) => {
+                "value" if !b.trim().is_empty() && is_identifier(a) => {
                     cfg.entry_mut(file, comp).set_value(a, b);
                 }
                 "size" => {
@@ -364,6 +371,10 @@ impl ProjectStore for LocalStore {
                 format!("{new} already exists"),
             ));
         }
+        let old_cfg = self.preview_config(project);
+        let mut new_cfg = old_cfg.clone();
+        new_cfg.rename_file(old, &new);
+        let moved_preview = new_cfg != old_cfg;
         let from_rec = self.recovery_path(project, old)?;
         let to_rec = self.recovery_path(project, &new)?;
         let to_bak = to.with_file_name(format!("{new}.bak"));
@@ -373,18 +384,25 @@ impl ProjectStore for LocalStore {
                 format!("{new} has a backup or recovery copy"),
             ));
         }
-        fs::rename(&from, &to)?;
-        rename_if_exists(
-            &from.with_file_name(format!("{old}.bak")),
-            &to_bak,
-        )?;
-        rename_if_exists(&from_rec, &to_rec)?;
-        if self.last_open()? == Some((project.to_string(), old.to_string())) {
-            self.set_last_open(project, &new)?;
+        if moved_preview {
+            // Before the file moves, so a failure here leaves everything as it was.
+            self.set_preview_config(project, &new_cfg)?;
         }
-        let mut cfg = self.preview_config(project);
-        cfg.rename_file(old, &new);
-        let _ = self.set_preview_config(project, &cfg);
+        let moved = (|| {
+            fs::rename(&from, &to)?;
+            rename_if_exists(&from.with_file_name(format!("{old}.bak")), &to_bak)?;
+            rename_if_exists(&from_rec, &to_rec)?;
+            if self.last_open()? == Some((project.to_string(), old.to_string())) {
+                self.set_last_open(project, &new)?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = moved {
+            if moved_preview {
+                let _ = self.set_preview_config(project, &old_cfg);
+            }
+            return Err(e);
+        }
         Ok(new)
     }
 
@@ -550,7 +568,7 @@ mod tests {
         let path = d.path().join("projects/p/.preview");
         std::fs::write(
             &path,
-            "garbage\nvalue\tf.slint\tC\tx\t1\nvalue\tf.slint\tC\tbad name\t2\nsize\tf.slint\tC\tabc\t3\nsize\tf.slint\tC\t0\t5\nvalue\tf.slint\n\u{0}\u{ff}",
+            "garbage\nvalue\tf.slint\tC\tx\t1\nvalue\tf.slint\tC\tbad name\t2\nvalue\tf.slint\tC\tx:1px;}R{y\t2\nsize\tf.slint\tC\tabc\t3\nsize\tf.slint\tC\t0\t5\nvalue\tf.slint\n\u{0}\u{ff}",
         )
         .unwrap();
         let c = s.preview_config("p").get("f.slint", "C");

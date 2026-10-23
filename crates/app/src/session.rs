@@ -468,6 +468,13 @@ impl Session {
             .collect()
     }
 
+    /// The stored values that name a declared `in` / `in-out` property of the current
+    /// component: only those are ever compiled (a stale or hand-edited `.preview` entry is not).
+    fn effective_values(&self) -> Vec<(String, String)> {
+        let names: Vec<String> = self.preview_props().into_iter().map(|p| p.name).collect();
+        self.preview().values.into_iter().filter(|(n, _)| names.contains(n)).collect()
+    }
+
     /// Texts the live preview shows right now (see `LiveInstance::visible_texts`).
     pub fn visible_texts(&self) -> Vec<String> {
         self.live.borrow().as_ref().map(|l| l.visible_texts()).unwrap_or_default()
@@ -530,7 +537,7 @@ impl Session {
     /// together with the instance, when the container runs the factory, so geometry queries
     /// always see an instance and the text it was built from.
     pub fn rebuild(&mut self) -> Option<slint::ComponentFactory> {
-        match compile_with(self.doc.text(), self.doc.path(), &self.component, &self.preview().values) {
+        match compile_with(self.doc.text(), self.doc.path(), &self.component, &self.effective_values()) {
             Ok(b) => {
                 let c = b.compiled;
                 self.dropped = b.dropped;
@@ -550,6 +557,7 @@ impl Session {
             }
             Err(d) => {
                 self.diagnostics = d;
+                self.dropped.clear();
                 None
             }
         }
@@ -557,7 +565,7 @@ impl Session {
 
     /// Compiles and instantiates standalone (for tests).
     pub fn rebuild_standalone(&mut self, width: f32, height: f32) -> bool {
-        match compile_with(self.doc.text(), self.doc.path(), &self.component, &self.preview().values) {
+        match compile_with(self.doc.text(), self.doc.path(), &self.component, &self.effective_values()) {
             Ok(b) => {
                 let c = b.compiled;
                 self.dropped = b.dropped;
@@ -568,6 +576,7 @@ impl Session {
             }
             Err(d) => {
                 self.diagnostics = d;
+                self.dropped.clear();
                 false
             }
         }

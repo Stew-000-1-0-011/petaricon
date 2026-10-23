@@ -89,25 +89,38 @@ fn line_col_to_offset(text: &str, line: usize, column: usize) -> Option<usize> {
     Some(line_start + col)
 }
 
+/// Slint identifier (`[A-Za-z_][A-Za-z0-9_-]*`): the only thing a property name may be.
+pub fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Why `expr` cannot be inlined as `name: expr;` into the wrapper (it would escape the
-/// binding), or `None`.
+/// binding or swallow its neighbours), or `None`. Comments and `\{` interpolation have no use
+/// in preview values and are refused.
 fn shape_error(expr: &str) -> Option<&'static str> {
     let mut stack: Vec<char> = Vec::new();
     let mut in_str = false;
-    let mut chars = expr.chars();
+    let mut chars = expr.chars().peekable();
     while let Some(c) = chars.next() {
         if in_str {
             match c {
-                '\\' => {
-                    chars.next();
-                }
+                '\\' => match chars.next() {
+                    Some('{') => return Some("文字列の中の \\{ は使えません"),
+                    Some(_) => {}
+                    None => return Some("文字列が閉じていません"),
+                },
                 '"' => in_str = false,
+                '\n' | '\r' => return Some("改行は使えません"),
                 _ => {}
             }
             continue;
         }
         match c {
             '"' => in_str = true,
+            '/' if matches!(chars.peek(), Some('/' | '*')) => return Some("コメントは使えません"),
+            '*' if chars.peek() == Some(&'/') => return Some("コメントは使えません"),
             '(' | '[' | '{' => stack.push(c),
             ')' | ']' | '}' => {
                 let open = match c {
@@ -133,51 +146,94 @@ fn shape_error(expr: &str) -> Option<&'static str> {
     None
 }
 
-fn build(
+/// An error of a build: message and byte offset in the whole compiled source (text + wrapper).
+struct RawError {
+    message: String,
+    full_offset: Option<usize>,
+}
+
+thread_local! {
+    static COMPILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times the Slint compiler has run on this thread (for measuring).
+pub fn compile_count() -> usize {
+    COMPILES.with(|c| c.get())
+}
+
+/// Byte ranges (in the compiled source) of each binding ` name: expr;`, in order.
+type Ranges = Vec<std::ops::Range<usize>>;
+
+fn build_raw(
     text: &str,
     path: &Path,
     component: &str,
     values: &[(String, String)],
-) -> Result<Compiled, Vec<Diagnostic>> {
-    let bindings: String = values.iter().map(|(n, v)| format!(" {n}: {v};")).collect();
-    let full = format!(
-        "{text}\nexport component {WRAPPER_NAME} inherits Rectangle {{ {component} {{ width: 100%; height: 100%;{bindings} }} }}\n"
+) -> (Result<Compiled, Vec<RawError>>, Ranges) {
+    let head = format!(
+        "{text}\nexport component {WRAPPER_NAME} inherits Rectangle {{ {component} {{ width: 100%; height: 100%;"
     );
+    let mut full = head;
+    let mut ranges = Vec::new();
+    for (n, v) in values {
+        let start = full.len();
+        full += &format!(" {n}: {v};");
+        ranges.push(start..full.len());
+    }
+    full += " } }\n";
     // Source files are matched by path: `..` and symlinks must not make them differ.
     let path = &path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    COMPILES.with(|c| c.set(c.get() + 1));
     let t0 = Instant::now();
     let compiler = slint_interpreter::Compiler::new();
     let result = spin_on::spin_on(compiler.build_from_source(full.clone(), path.to_path_buf()));
     let compile_ms = t0.elapsed().as_secs_f32() * 1000.0;
-    let errors: Vec<Diagnostic> = result
+    let errors: Vec<RawError> = result
         .diagnostics()
         .filter(|d| d.level() == DiagnosticLevel::Error)
         .map(|d| {
             let (line, col) = d.line_column();
-            let offset = line_col_to_offset(&full, line, col)
-                .filter(|&o| o < text.len())
-                .map(|o| o as u32);
-            Diagnostic {
+            RawError {
                 message: d.message().to_string(),
-                offset,
+                full_offset: line_col_to_offset(&full, line, col),
             }
         })
         .collect();
     if !errors.is_empty() {
-        return Err(errors);
+        return (Err(errors), ranges);
     }
-    match result.component(WRAPPER_NORMALIZED) {
+    let r = match result.component(WRAPPER_NORMALIZED) {
         Some(def) => Ok(Compiled {
             compile_ms,
             def,
             path: path.to_path_buf(),
             text_len: text.len() as u32,
         }),
-        None => Err(vec![Diagnostic {
+        None => Err(vec![RawError {
             message: format!("component `{component}` not found"),
-            offset: None,
+            full_offset: None,
         }]),
-    }
+    };
+    (r, ranges)
+}
+
+fn to_diagnostics(errors: Vec<RawError>, text_len: usize) -> Vec<Diagnostic> {
+    errors
+        .into_iter()
+        .map(|e| Diagnostic {
+            message: e.message,
+            offset: e.full_offset.filter(|&o| o < text_len).map(|o| o as u32),
+        })
+        .collect()
+}
+
+fn build(
+    text: &str,
+    path: &Path,
+    component: &str,
+    values: &[(String, String)],
+) -> Result<Compiled, Vec<Diagnostic>> {
+    build_raw(text, path, component, values).0.map_err(|e| to_diagnostics(e, text.len()))
 }
 
 pub fn compile(text: &str, path: &Path, component: &str) -> Result<Compiled, Vec<Diagnostic>> {
@@ -190,44 +246,148 @@ pub struct Built {
     pub dropped: Vec<(String, String)>,
 }
 
+type Verdict = Result<(), String>;
+type VerdictKey = (u64, String, String, String);
+
+thread_local! {
+    /// Whether a value compiles for a given source text (hash of text and path), component
+    /// and property, so that a value already known good or bad is never compiled again.
+    static VERDICTS: RefCell<std::collections::HashMap<VerdictKey, Verdict>> = RefCell::default();
+}
+
+fn text_key(text: &str, path: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    path.hash(&mut h);
+    h.finish()
+}
+
+fn verdict_of(key: &VerdictKey) -> Option<Verdict> {
+    VERDICTS.with(|v| v.borrow().get(key).cloned())
+}
+
+fn remember(key: VerdictKey, v: Verdict) {
+    VERDICTS.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() > 2000 {
+            m.clear();
+        }
+        m.insert(key, v);
+    });
+}
+
 /// Compiles with `values` (property name, Slint expression) given to the edited component.
 /// A value that does not compile is dropped (the others still apply) and reported in
 /// `dropped` with the compiler's reason. Fails only when the text itself does not compile.
+///
+/// One compile in the common case. When it fails, errors located inside a binding are
+/// attributed to that value (remembered per source text, so the next build with the same bad
+/// value compiles once); only errors that cannot be attributed fall back to compiling each
+/// unknown value alone.
 pub fn compile_with(
     text: &str,
     path: &Path,
     component: &str,
     values: &[(String, String)],
 ) -> Result<Built, Vec<Diagnostic>> {
+    let tk = text_key(text, path);
+    let key = |n: &str, v: &str| (tk, component.to_string(), n.to_string(), v.to_string());
     let mut dropped: Vec<(String, String)> = Vec::new();
-    let mut values_ok: Vec<(String, String)> = Vec::new();
+    // (name, expr, known good)
+    let mut live: Vec<(String, String, bool)> = Vec::new();
     for (n, v) in values {
-        match shape_error(v) {
-            Some(r) => dropped.push((n.clone(), r.to_string())),
-            None => values_ok.push((n.clone(), v.clone())),
+        if !is_identifier(n) {
+            dropped.push((n.clone(), "プロパティ名として使えません".to_string()));
+        } else if let Some(r) = shape_error(v) {
+            dropped.push((n.clone(), r.to_string()));
+        } else {
+            match verdict_of(&key(n, v)) {
+                Some(Err(why)) => dropped.push((n.clone(), why)),
+                Some(Ok(())) => live.push((n.clone(), v.clone(), true)),
+                None => live.push((n.clone(), v.clone(), false)),
+            }
         }
     }
-    if let Ok(compiled) = build(text, path, component, &values_ok) {
-        return Ok(Built { compiled, dropped });
-    }
-    let bare = build(text, path, component, &[])?;
-    let mut keep = Vec::new();
-    for (name, expr) in &values_ok {
-        let one = [(name.clone(), expr.clone())];
-        match build(text, path, component, &one) {
-            Err(e) => dropped.push((name.clone(), e.first().map(|d| d.message.clone()).unwrap_or_default())),
-            Ok(_) => keep.push((name.clone(), expr.clone())),
+    let pairs = |l: &[(String, String, bool)]| -> Vec<(String, String)> {
+        l.iter().map(|(n, v, _)| (n.clone(), v.clone())).collect()
+    };
+    let (first, ranges) = build_raw(text, path, component, &pairs(&live));
+    let errors = match first {
+        Ok(compiled) => {
+            for (n, v, _) in &live {
+                remember(key(n, v), Ok(()));
+            }
+            return Ok(Built { compiled, dropped });
+        }
+        Err(e) => e,
+    };
+    // Attribute errors to bindings by position.
+    let mut bad: Vec<Option<String>> = vec![None; live.len()];
+    let mut ambiguous = false;
+    for e in &errors {
+        let hit = e
+            .full_offset
+            .and_then(|o| ranges.iter().position(|r| r.contains(&o)));
+        match hit {
+            Some(i) => {
+                bad[i].get_or_insert_with(|| e.message.clone());
+            }
+            None => ambiguous = true,
         }
     }
-    if keep.is_empty() {
-        return Ok(Built { compiled: bare, dropped });
+    if ambiguous || bad.iter().all(Option::is_none) {
+        // The text itself may be broken, or the error cannot be attributed.
+        build(text, path, component, &[])?;
+        bad = vec![None; live.len()];
+        for (i, (n, v, good)) in live.iter().enumerate() {
+            if *good {
+                continue;
+            }
+            if let Err(e) = build(text, path, component, &[(n.clone(), v.clone())]) {
+                bad[i] = Some(e.first().map(|d| d.message.clone()).unwrap_or_default());
+            }
+        }
     }
-    match build(text, path, component, &keep) {
+    let mut keep: Vec<(String, String, bool)> = Vec::new();
+    for ((n, v, good), why) in live.into_iter().zip(bad) {
+        match why {
+            Some(why) => {
+                remember(key(&n, &v), Err(why.clone()));
+                dropped.push((n, why));
+            }
+            None => keep.push((n, v, good)),
+        }
+    }
+    // Only values that compile alone go into the combined build; verify the unknown ones.
+    if keep.iter().any(|k| !k.2) {
+        let mut verified = Vec::new();
+        for (n, v, good) in keep {
+            if good {
+                verified.push((n, v, true));
+                continue;
+            }
+            match build(text, path, component, &[(n.clone(), v.clone())]) {
+                Ok(_) => {
+                    remember(key(&n, &v), Ok(()));
+                    verified.push((n, v, true));
+                }
+                Err(e) => {
+                    let why = e.first().map(|d| d.message.clone()).unwrap_or_default();
+                    remember(key(&n, &v), Err(why.clone()));
+                    dropped.push((n, why));
+                }
+            }
+        }
+        keep = verified;
+    }
+    match build(text, path, component, &pairs(&keep)) {
         Ok(compiled) => Ok(Built { compiled, dropped }),
         Err(e) => {
-            // Each value is fine alone but not together.
+            // Each value is fine alone but not together (or the text is broken).
+            let bare = build(text, path, component, &[])?;
             let why = e.first().map(|d| d.message.clone()).unwrap_or_default();
-            dropped.extend(keep.into_iter().map(|(n, _)| (n, why.clone())));
+            dropped.extend(keep.into_iter().map(|(n, _, _)| (n, why.clone())));
             Ok(Built { compiled: bare, dropped })
         }
     }

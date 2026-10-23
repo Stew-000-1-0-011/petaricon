@@ -130,3 +130,37 @@ fn broken_text_still_fails_even_with_values() {
     let text = "component P inherits Rectangle { Text { text: 1 +; } }";
     assert!(preview::compile_with(text, Path::new("/t/p.slint"), "P", &[v("n", "1")]).is_err());
 }
+
+#[test]
+fn hostile_names_and_comment_tricks_cannot_merge_or_escape_bindings() {
+    i_slint_backend_testing::init_no_event_loop();
+    let vals = [
+        v("x:1px;}Rectangle{y", "1"),
+        v("n", "1 /*"),
+        v("label", "*/ \"a\""),
+        v("on", "true // x"),
+        v("label2", "\"a\\{1}\""),
+        v("n", "4"),
+    ];
+    let b = preview::compile_with(PARAM, Path::new("/t/p.slint"), "P", &vals).unwrap();
+    // `n: 4` is the only good one; every other entry is dropped with a reason.
+    assert_eq!(b.dropped.len(), 5, "{:?}", b.dropped);
+    assert!(b.dropped.iter().all(|d| !d.1.is_empty()));
+    let inst = b.compiled.instantiate(200., 100.);
+    let second = PARAM.rfind("Rectangle {").unwrap() as u32;
+    // `on` is false, so the width stays 5px; and no element was added by the hostile name.
+    assert_eq!(inst.geometry(second).unwrap().rect.w, 5.);
+}
+
+#[test]
+fn a_known_bad_value_costs_one_compile_after_the_first_time() {
+    i_slint_backend_testing::init_no_event_loop();
+    let vals = [v("n", "4"), v("on", "true"), v("label", "1 +")];
+    let text = format!("{PARAM}\n// cache probe");
+    let first = preview::compile_with(&text, Path::new("/t/p.slint"), "P", &vals).unwrap();
+    assert_eq!(first.dropped.len(), 1);
+    let before = preview::compile_count();
+    let again = preview::compile_with(&text, Path::new("/t/p.slint"), "P", &vals).unwrap();
+    assert_eq!(again.dropped.len(), 1);
+    assert_eq!(preview::compile_count() - before, 1);
+}

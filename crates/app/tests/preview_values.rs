@@ -112,3 +112,34 @@ fn screen_size_defaults_and_follows_the_choice() {
     assert_eq!(parse_screen_size("0x5"), None);
     assert_eq!(parse_screen_size("abc"), None);
 }
+
+#[test]
+fn a_rebuild_with_one_bad_value_is_one_compile_after_the_first() {
+    let mut s = main_window();
+    s.set_preview_value("connected", "true");
+    s.set_preview_value("page", "1");
+    s.set_preview_value("rtt-ms", "\"x\" +");
+    assert!(s.rebuild_standalone(480., 800.));
+    let n0 = preview::compile_count();
+    for _ in 0..3 {
+        assert!(s.rebuild_standalone(480., 800.));
+    }
+    let per_rebuild = (preview::compile_count() - n0) as f32 / 3.;
+    eprintln!("compiles per rebuild with one bad value: {per_rebuild}");
+    assert_eq!(per_rebuild, 1.0);
+    assert!(!s.preview_props().iter().find(|p| p.name == "rtt-ms").unwrap().error.is_empty());
+}
+
+#[test]
+fn stored_values_for_undeclared_properties_are_never_compiled() {
+    let mut s = main_window();
+    let mut p = storage::ComponentPreview::default();
+    p.values.push(("x:1px;}Rectangle{y".to_string(), "1".to_string()));
+    p.values.push(("confirm-leave".to_string(), "true".to_string()));
+    p.values.push(("page".to_string(), "1".to_string()));
+    s.set_previews([("MainWindow".to_string(), p)].into());
+    let n0 = preview::compile_count();
+    assert!(s.rebuild_standalone(480., 800.), "{:?}", s.diagnostics());
+    assert_eq!(preview::compile_count() - n0, 1);
+    assert!(s.preview_props().iter().all(|p| p.error.is_empty()));
+}
