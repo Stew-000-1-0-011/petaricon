@@ -9,6 +9,7 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use slint_doc::Document;
 use storage::ProjectStore;
 
+use crate::nav::{self, Nav};
 use crate::session::{Corner, Session, TidyReport, TreeAction, TreeRow};
 use crate::tidy_overlay::{self, MarkKind};
 use crate::{Editor, GuideBand, PropItem, TidyMark, TreeRowItem};
@@ -29,6 +30,20 @@ const TOAST_TIME: Duration = Duration::from_secs(3);
 
 thread_local! {
     static SAVE_HOOK: RefCell<Option<Rc<dyn Fn() -> bool>>> = const { RefCell::new(None) };
+}
+
+/// Where the preview finds the file: its place on disk when the store has one (so `import`s
+/// and assets beside it resolve), else `project/file`.
+pub fn document_path(store: &dyn ProjectStore, project: &str, file: &str) -> PathBuf {
+    store
+        .location(project, file)
+        .unwrap_or_else(|| PathBuf::from(format!("{project}/{file}")))
+}
+
+/// Reads `file` into a new session (no preview yet).
+pub fn load_session(store: &dyn ProjectStore, project: &str, file: &str) -> Result<Session, String> {
+    let text = store.read(project, file).map_err(|e| format!("{file}: {e}"))?;
+    Ok(Session::new(Document::new(document_path(store, project, file), text)))
 }
 
 /// Saves the open file. Safe to call from platform callbacks on the UI thread (e.g. Android
@@ -226,6 +241,8 @@ pub struct Glue {
     guide_target: RefCell<Option<slint_doc::ElementPath>>,
     /// Tolerance of Tidy in px.
     tolerance: i32,
+    /// Where 「戻る」 goes.
+    nav: Nav,
     /// The last Tidy, drawn over the canvas until the next edit or selection change.
     tidy_report: Option<TidyReport>,
 }
@@ -251,11 +268,7 @@ impl Glue {
         project: &str,
         file: &str,
     ) -> Result<Session, String> {
-        let text = store.read(project, file).map_err(|e| format!("{file}: {e}"))?;
-        let mut session = Session::new(Document::new(
-            PathBuf::from(format!("{project}/{file}")),
-            text,
-        ));
+        let mut session = load_session(store, project, file)?;
         let me = me.clone();
         // The container switches to a new build some time after `set_factory`; refresh the
         // selection overlay once that has happened.
@@ -399,6 +412,8 @@ impl Glue {
     pub fn update_overlay(&self) {
         self.refresh_tree();
         let ed = self.editor();
+        ed.set_can_open_inside(self.session.selected_use().is_some());
+        ed.set_can_go_back(!self.nav.is_empty());
         match self.session.selection_hit() {
             Some(hit) => {
                 ed.set_sel_x(hit.rect.x);
@@ -616,19 +631,57 @@ impl Glue {
         }
         match Self::load(&*self.store, &self.me, project, file) {
             Ok(session) => {
-                self.project = project.to_string();
-                self.file = file.to_string();
-                self.session = session;
-                self.loaded = true;
-                self.last_recovery = None;
-                let _ = self.store.set_last_open(project, file);
-                self.refresh_lists();
-                self.editor().set_has_selection(false);
-                self.rebuild();
-                self.check_recovery();
+                self.nav.clear();
+                self.show_loaded(project, file, session);
             }
             Err(e) => self.set_error(&e),
         }
+    }
+
+    /// Makes a freshly loaded session the open document.
+    fn show_loaded(&mut self, project: &str, file: &str, session: Session) {
+        self.project = project.to_string();
+        self.file = file.to_string();
+        self.session = session;
+        self.loaded = true;
+        self.last_recovery = None;
+        let _ = self.store.set_last_open(project, file);
+        self.refresh_lists();
+        self.editor().set_has_selection(false);
+        self.rebuild();
+        self.check_recovery();
+    }
+
+    /// 「中を開く」 / 「戻る」: runs `jump` (which may replace the session and file), then
+    /// shows the result.
+    fn navigate(&mut self, back: bool) {
+        self.begin_action();
+        self.discard_source_edits();
+        let (store, project) = (&*self.store, self.project.clone());
+        let me = self.me.clone();
+        let old_file = self.file.clone();
+        let load = |f: &str| Glue::load(store, &me, &project, f);
+        let r = if back {
+            nav::go_back(store, &project, &mut self.file, &mut self.session, self.loaded, &mut self.nav, &load)
+        } else {
+            nav::open_inside(store, &project, &mut self.file, &mut self.session, self.loaded, &mut self.nav, &load)
+        };
+        if let Err(e) = r {
+            self.set_error(&e);
+            return;
+        }
+        if self.file != old_file {
+            self.loaded = true;
+            self.last_recovery = None;
+            let _ = self.store.set_last_open(&project, &self.file);
+            self.refresh_lists();
+            self.rebuild();
+            self.check_recovery();
+        } else {
+            self.rebuild();
+        }
+        self.update_overlay();
+        self.refresh_panels();
     }
 
     /// Saves if there are unsaved edits. Returns false when a save was needed and failed.
@@ -862,7 +915,8 @@ impl Glue {
     fn document_moved(&mut self, project: &str, file: &str) {
         self.project = project.to_string();
         self.file = file.to_string();
-        self.session.set_path(PathBuf::from(format!("{project}/{file}")));
+        self.session.set_path(document_path(&*self.store, project, file));
+        self.nav.clear();
         let _ = self.store.set_last_open(project, file);
     }
 
@@ -1173,6 +1227,8 @@ fn connect(editor: &Editor, glue: &Shared) {
             });
         }};
     }
+    on!(on_open_inside, |g| g.navigate(false));
+    on!(on_go_back, |g| g.navigate(true));
     on!(on_tapped, |g, x, y| g.tapped(x, y));
     on!(on_drag_finished, |g, dx, dy| g.drag_finished(dx, dy));
     on!(on_resize_finished, |g, c, dx, dy| g.resize_finished(c, dx, dy));
@@ -1242,6 +1298,7 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
             guide_target: RefCell::new(None),
             tolerance,
             tidy_report: None,
+            nav: Nav::default(),
         })
     });
     connect(editor, &glue);

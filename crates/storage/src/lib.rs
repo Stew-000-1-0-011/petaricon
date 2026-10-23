@@ -49,6 +49,11 @@ pub trait ProjectStore {
     fn rename_file(&self, project: &str, old: &str, new: &str) -> io::Result<String>;
     /// Renames a project directory; never overwrites.
     fn rename_project(&self, old: &str, new: &str) -> io::Result<()>;
+    /// Where the file lives on disk, so that `import`s and assets next to it resolve in the
+    /// preview. `None` for stores that are not backed by files.
+    fn location(&self, _project: &str, _file: &str) -> Option<PathBuf> {
+        None
+    }
     fn read(&self, project: &str, file: &str) -> io::Result<String>;
     fn write(&self, project: &str, file: &str, text: &str) -> io::Result<()>;
     fn write_recovery(&self, project: &str, file: &str, text: &str) -> io::Result<()>;
@@ -133,6 +138,10 @@ fn remove_if_exists(path: &Path) -> io::Result<()> {
 }
 
 impl ProjectStore for LocalStore {
+    fn location(&self, project: &str, file: &str) -> Option<PathBuf> {
+        self.file_path(project, file).ok()
+    }
+
     fn projects(&self) -> io::Result<Vec<String>> {
         let mut names = Vec::new();
         for entry in fs::read_dir(&self.root)? {

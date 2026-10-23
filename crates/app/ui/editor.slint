@@ -13,6 +13,9 @@ export component Editor inherits Window {
     in property <string> error-text;
     in property <bool> has-selection;
     in property <bool> sel-movable: true;
+    // The selection uses a user-defined component (「中を開く」), and 「戻る」 has a place to go.
+    in property <bool> can-open-inside;
+    in property <bool> can-go-back;
     // Selection rectangle in design coordinates.
     in property <length> sel-x;
     in property <length> sel-y;
@@ -70,6 +73,8 @@ export component Editor inherits Window {
     callback tapped(length, length);
     callback drag-finished(length, length);
     callback resize-finished(int /* Corner */, length, length);
+    callback open-inside();
+    callback go-back();
     callback undo();
     callback redo();
     callback save();
@@ -253,6 +258,8 @@ export component Editor inherits Window {
                 if !root.narrow: ToolButton { text: "Stack"; min-width: 60px; clicked => { root.stack(); } }
                 if !root.narrow: ToolButton { text: "Unstack"; min-width: 72px; clicked => { root.unstack(); } }
                 if !root.narrow: ToolButton { text: "Extract"; min-width: 68px; clicked => { root.extract-open(); } }
+                ToolButton { text: "戻る"; enabled: root.can-go-back; min-width: 56px; clicked => { root.go-back(); } }
+                ToolButton { text: "中を開く"; enabled: root.can-open-inside; min-width: 84px; clicked => { root.open-inside(); } }
                 ToolButton { text: "-"; clicked => { root.zoom(0.8); } }
                 ToolButton { text: "+"; clicked => { root.zoom(1.25); } }
             }

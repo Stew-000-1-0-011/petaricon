@@ -28,6 +28,8 @@ pub enum SessionError {
     NotALayout,
     #[error("選んだ要素はレイアウトです。先に「Unstack」で子要素を自由にしてください")]
     TidyOnLayout,
+    #[error("選んだ要素は部品の利用ではありません。部品の利用を選んでください")]
+    NotAUse,
     #[error("プレビューを更新中です。もう一度押してください")]
     PreviewUpdating,
     #[error("整える子要素がありません")]
@@ -38,6 +40,15 @@ pub enum SessionError {
     Compile(Vec<Diagnostic>),
     #[error("表示後にソースが変わりました。ソースタブを開き直してください")]
     StaleSource,
+}
+
+/// Where the component used by the selected element is defined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UseTarget {
+    /// Declared in the open file.
+    Local(String),
+    /// Imported: the path as written in the `import`, and the name in that file.
+    Imported { path: String, component: String },
 }
 
 /// How a property value is entered and normalised.
@@ -444,6 +455,20 @@ impl Session {
         self.selection.clone()
     }
 
+    /// The definition of the component the selected element uses, when it is a use of a
+    /// user-defined component (in this file or imported).
+    pub fn selected_use(&self) -> Option<UseTarget> {
+        let info = self.doc.element(self.selection.as_ref()?)?;
+        let name = info.type_name;
+        if self.doc.components().iter().any(|c| c.name == name) {
+            return Some(UseTarget::Local(name));
+        }
+        self.doc.imports().into_iter().find_map(|i| {
+            let (external, _) = i.names.into_iter().find(|(_, internal)| *internal == name)?;
+            Some(UseTarget::Imported { path: i.path, component: external })
+        })
+    }
+
     pub fn selection_hit(&self) -> Option<Hit> {
         self.hit_of(self.selection.as_ref()?)
     }
@@ -559,7 +584,9 @@ impl Session {
         if !is_identifier(name) {
             return Some("名前に使えるのは英数字・_・- だけです(先頭は英字か _)".into());
         }
-        if self.doc.components().iter().any(|c| c.name == name) {
+        if self.doc.components().iter().any(|c| c.name == name)
+            || self.doc.global_names().iter().any(|g| g == name)
+        {
             return Some("同じ名前の部品があります".into());
         }
         None

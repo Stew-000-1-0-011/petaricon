@@ -3,6 +3,7 @@ pub mod font;
 pub mod glue;
 pub mod guides;
 pub mod layout_bridge;
+pub mod nav;
 pub mod session;
 pub mod tidy_overlay;
 

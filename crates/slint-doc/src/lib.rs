@@ -66,6 +66,15 @@ pub struct ComponentInfo {
     pub declarations: Vec<String>,
 }
 
+/// One `import { A, B as C } from "path";` (a bare `import "font.ttf";` is not listed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportInfo {
+    /// The path as written, without quotes.
+    pub path: String,
+    /// `(name in the other file, name used here)`.
+    pub names: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Document {
     path: PathBuf,
@@ -226,10 +235,46 @@ impl Document {
         syntax::parse(&self.text, &self.path)
     }
 
+    /// The `global` declarations (they cannot be previewed, so `components()` leaves them out).
+    pub fn global_names(&self) -> Vec<String> {
+        let root = self.parse();
+        syntax::components(&root)
+            .iter()
+            .filter(|c| syntax::is_global(c))
+            .map(syntax::component_name)
+            .collect()
+    }
+
+    pub fn imports(&self) -> Vec<ImportInfo> {
+        let root = self.parse();
+        root.children()
+            .filter(|n| n.kind() == SyntaxKind::ImportSpecifier)
+            .filter_map(|n| {
+                let lit = n
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .find(|t| t.kind() == SyntaxKind::StringLiteral)?;
+                let path = lit.text().trim_matches('"').to_string();
+                let list = n.child_node(SyntaxKind::ImportIdentifierList)?;
+                let names = list
+                    .children()
+                    .filter(|i| i.kind() == SyntaxKind::ImportIdentifier)
+                    .filter_map(|i| {
+                        let ext = i.child_node(SyntaxKind::ExternalName)?.text().to_string().trim().to_string();
+                        let int = i.child_node(SyntaxKind::InternalName).map_or(ext.clone(), |n| n.text().to_string().trim().to_string());
+                        Some((ext, int))
+                    })
+                    .collect();
+                Some(ImportInfo { path, names })
+            })
+            .collect()
+    }
+
     pub fn components(&self) -> Vec<ComponentInfo> {
         let root = self.parse();
         syntax::components(&root)
             .iter()
+            .filter(|c| !syntax::is_global(c))
             .map(|c| {
                 let element = syntax::component_element(c);
                 ComponentInfo {

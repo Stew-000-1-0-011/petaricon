@@ -73,15 +73,15 @@ fn nested_hits_are_ordered_deepest_first() {
 }
 
 #[test]
-fn used_subcomponent_contents_are_hit() {
+fn used_subcomponent_is_one_node_its_contents_are_not_hit() {
     i_slint_backend_testing::init_no_event_loop();
     let t = "component Chip inherits Rectangle { Text { x: 3px; y: 4px; width: 30px; height: 10px; text: \"c\"; } }\ncomponent Host inherits Rectangle { Chip { x: 50px; y: 10px; width: 60px; height: 40px; } }";
     let c = compile(t, Path::new("/t/h.slint"), "Host").unwrap();
     let inst = c.instantiate(200., 100.);
-    let text_at = t.find("Text").unwrap() as u32;
     let chip_use = t.rfind("Chip {").unwrap() as u32;
+    // A tap on the Text inside the use reports the use only.
     let starts: Vec<u32> = inst.hits_at(55., 16.).iter().map(|h| h.start).collect();
-    assert_eq!(starts, vec![text_at, chip_use]);
+    assert_eq!(starts, vec![chip_use]);
 }
 
 #[test]

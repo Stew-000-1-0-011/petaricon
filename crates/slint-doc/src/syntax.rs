@@ -17,6 +17,13 @@ pub(crate) fn component_name(component: &SyntaxNode) -> String {
         .unwrap_or_default()
 }
 
+/// `global Name { .. }`: the node starts with the keyword token.
+pub(crate) fn is_global(component: &SyntaxNode) -> bool {
+    component
+        .child_token(SyntaxKind::Identifier)
+        .is_some_and(|t| t.text() == "global")
+}
+
 pub(crate) fn components(root: &SyntaxNode) -> Vec<SyntaxNode> {
     root.descendants()
         .filter(|n| n.kind() == SyntaxKind::Component)

@@ -195,7 +195,6 @@ fn moving_an_element_inside_a_layout_is_refused_and_leaves_text_alone() {
 }
 
 #[test]
-#[ignore = "globals (Theme, ScreenState, ConsoleState) are listed by Document::components() but cannot be previewed (\"Cannot create an instance of a global component\"); not covered by Tasks 2-4, decide in Task 2 whether the component picker should hide them"]
 fn globals_are_not_offered_as_previewable_components() {
     i_slint_backend_testing::init_no_event_loop();
     for file in slint_files() {

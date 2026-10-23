@@ -49,11 +49,13 @@ pub struct Hit {
 }
 
 /// Child elements to visit, topmost first. A used (non-inlined) component also exposes
-/// its own element tree through its root element.
-fn kids(e: &ElementRc) -> Vec<ElementRc> {
+/// its own element tree through its root element, but only when `enter` is set: that is
+/// wanted for the wrapper's use of the edited component, never for uses inside it. A use is
+/// one node; what lies inside it belongs to another definition.
+fn kids(e: &ElementRc, enter: bool) -> Vec<ElementRc> {
     let elem = e.borrow();
     let mut v: Vec<ElementRc> = elem.children.iter().rev().cloned().collect();
-    if let ElementType::Component(c) = &elem.base_type {
+    if enter && let ElementType::Component(c) = &elem.base_type {
         v.push(c.root_element.clone());
     }
     v
@@ -91,6 +93,8 @@ pub fn compile(text: &str, path: &Path, component: &str) -> Result<Compiled, Vec
     let full = format!(
         "{text}\nexport component {WRAPPER_NAME} inherits Rectangle {{ {component} {{ width: 100%; height: 100%; }} }}\n"
     );
+    // Source files are matched by path: `..` and symlinks must not make them differ.
+    let path = &path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let t0 = Instant::now();
     let compiler = slint_interpreter::Compiler::new();
     let result = spin_on::spin_on(compiler.build_from_source(full.clone(), path.to_path_buf()));
@@ -172,6 +176,15 @@ impl Compiled {
 }
 
 impl LiveInstance {
+    /// The element the wrapper appended after the edited text uses to place the edited
+    /// component: the only use whose inside is entered.
+    fn is_wrapper_use(&self, e: &ElementRc) -> bool {
+        e.borrow().debug.iter().any(|d| {
+            d.node.source_file.path() == self.path
+                && u32::from(d.node.text_range().start()) >= self.text_len
+        })
+    }
+
     fn own_start(&self, e: &ElementRc) -> Option<u32> {
         let elem = e.borrow();
         let dbg = elem.debug.iter().find(|d| {
@@ -204,7 +217,7 @@ impl LiveInstance {
             p: i_slint_core::lengths::LogicalPoint,
             depth: usize,
         ) -> Option<Vec<Hit>> {
-            for c in &kids(e) {
+            for c in &kids(e, li.is_wrapper_use(e)) {
                 if let Some(mut chain) = walk(li, c, p, depth + 1) {
                     if depth > 0
                         && let Some(h) = li.own_hit(e, p)
@@ -242,7 +255,7 @@ impl LiveInstance {
     /// that `geometry` could look up): the wrapper's single child, the use site of the
     /// component. `Hit::start` is 0.
     pub fn root_geometry(&self) -> Option<Hit> {
-        let used = kids(&self.root()).into_iter().next()?;
+        let used = kids(&self.root(), false).into_iter().next()?;
         let rect = self.inst.element_positions(&used).into_iter().next()?;
         Some(Self::hit_for(&rect, 0))
     }
@@ -254,7 +267,7 @@ impl LiveInstance {
                 let rect = li.inst.element_positions(e).into_iter().next()?;
                 return Some(LiveInstance::hit_for(&rect, start));
             }
-            kids(e).iter().find_map(|c| find(li, c, start))
+            kids(e, li.is_wrapper_use(e)).iter().find_map(|c| find(li, c, start))
         }
         find(self, &self.root(), start)
     }
