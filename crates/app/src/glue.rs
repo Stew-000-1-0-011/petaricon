@@ -263,6 +263,8 @@ pub struct Glue {
     recovered: Option<(String, String, String)>,
     /// Name of the component just extracted; declarations are added to it.
     extracted: String,
+    /// The property the 引数にする dialog is about.
+    param_prop: String,
     guide_target: RefCell<Option<slint_doc::ElementPath>>,
     /// Tolerance of Tidy in px.
     tolerance: i32,
@@ -413,7 +415,14 @@ impl Glue {
             .session
             .properties()
             .into_iter()
-            .map(|r| PropItem { name: r.name.into(), value: r.shown.into(), error: "".into() })
+            .map(|r| PropItem {
+                name: r.name.into(),
+                value: r.shown.into(),
+                error: "".into(),
+                ty: r.ty.into(),
+                placeholder: r.placeholder.into(),
+                can_param: r.can_param,
+            })
             .collect();
         let ed = self.editor();
         ed.set_props(ModelRc::new(VecModel::from(rows)));
@@ -1442,6 +1451,51 @@ impl Glue {
         self.editor().set_extract_step(1);
     }
 
+    /// 引数にする on a Props row: opens the name (and type) dialog, or says why not.
+    fn param_ask(&mut self, property: &str) {
+        self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
+        match self.session.can_parameterize(property) {
+            Ok((name, ty)) => {
+                self.param_prop = property.to_string();
+                let ed = self.editor();
+                ed.set_param_name(name.into());
+                ed.set_param_subject(format!("{property} の値を、この部品の引数にします").into());
+                ed.set_param_need_type(ty.is_none());
+                ed.set_dialog_error("".into());
+                ed.set_param_open(true);
+            }
+            Err(reason) => self.set_error(&reason),
+        }
+    }
+
+    fn param_name_changed(&mut self, name: &str) {
+        let err = if name.is_empty() { None } else { self.session.parameter_name_error(name) };
+        self.editor().set_dialog_error(err.unwrap_or_default().into());
+    }
+
+    fn param_run(&mut self, name: &str, ty: &str) {
+        self.begin_action();
+        if self.locked(&self.project) {
+            self.editor().set_dialog_error(LOCKED_TEXT.into());
+            return;
+        }
+        let property = self.param_prop.clone();
+        match self.session.parameterize(&property, name, (!ty.is_empty()).then_some(ty)) {
+            Ok(()) => {
+                self.discard_source_edits();
+                self.rebuild_with(true, true);
+                let ed = self.editor();
+                ed.set_dialog_error("".into());
+                ed.set_param_open(false);
+                self.toast(&format!("{name} を引数にしました"));
+            }
+            Err(e) => self.editor().set_dialog_error(e.to_string().into()),
+        }
+    }
+
     fn extract_name_changed(&mut self, step: i32, name: &str) {
         let err = if name.is_empty() {
             None
@@ -1568,6 +1622,9 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_tree_action, |g, a| g.tree_action(a));
     on!(on_palette_picked, |g, n| g.palette_picked(&n));
     on!(on_prop_edited, |g, n, v| g.prop_edited(&n, &v));
+    on!(on_param_ask, |g, n| g.param_ask(&n));
+    on!(on_param_name_changed, |g, n| g.param_name_changed(&n));
+    on!(on_param_run, |g, n, t| g.param_run(&n, &t));
     on!(on_prop_accepted, |g, n, v| g.prop_accepted(&n, &v));
     on!(on_prop_flush, |g| g.flush_prop());
     on!(on_preview_set, |g, n, v| g.preview_set(&n, &v));
@@ -1645,6 +1702,7 @@ pub fn start_with(
             recovery_failed: false,
             recovered: None,
             extracted: String::new(),
+            param_prop: String::new(),
             guide_target: RefCell::new(None),
             tolerance,
             tidy_report: None,

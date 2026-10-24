@@ -1,6 +1,6 @@
 import { Palette } from "std-widgets.slint";
 import { Canvas, GuideBand, TidyMark } from "canvas.slint";
-import { BottomPanel, KbBar, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, PreviewItem, ExtractDialog, RecoveryDialog, FileActions, FileOpDialog, SettingsSection, GitHubActions } from "panels.slint";
+import { BottomPanel, KbBar, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, PreviewItem, ExtractDialog, ParamDialog, RecoveryDialog, FileActions, FileOpDialog, SettingsSection, GitHubActions } from "panels.slint";
 import { GitHubDialog } from "github.slint";
 export { TreeRowItem, PropItem, PreviewItem, GuideBand, TidyMark }
 
@@ -73,6 +73,11 @@ export component Editor inherits Window {
     in property <int> tidy-tolerance: 16;
     in property <int> guides-rev;
     in-out property <int> extract-step;
+    // 引数にする dialog.
+    in-out property <bool> param-open;
+    in property <string> param-name;
+    in property <string> param-subject;
+    in property <bool> param-need-type;
     in-out property <string> dialog-error;
     in-out property <bool> recovery-open;
     // File operation dialog: 0 closed, 1 new file, 2 rename file, 3 rename project, 4 save as.
@@ -122,6 +127,9 @@ export component Editor inherits Window {
     callback preview-set(string, string);
     callback screen-size-chosen(int, int);
     callback prop-edited(string, string);
+    callback param-ask(string);
+    callback param-name-changed(string);
+    callback param-run(string, string);
     callback prop-accepted(string, string);
     // The input bar closed because the keyboard went away: apply what was typed.
     callback prop-flush();
@@ -483,6 +491,7 @@ export component Editor inherits Window {
         value-blurred => { if !root.bar-visible { root.prop-editing = ""; } }
         prop-edited(n, v) => { root.prop-edited(n, v); }
         prop-accepted(n, v) => { root.prop-accepted(n, v); }
+        param-open(n) => { root.param-ask(n); }
         source-apply(t) => { root.source-apply(t); }
         source-edited() => { root.source-edited(); }
         tree-selected(i) => { root.tree-selected(i); }
@@ -651,6 +660,18 @@ export component Editor inherits Window {
         run(n) => { root.extract-run(n); }
         add(k, t, n) => { root.declaration-add(k, t, n); }
         close => { root.extract-step = 0; root.dialog-error = ""; }
+    }
+
+    if root.param-open: ParamDialog {
+        error: root.dialog-error;
+        initial-name: root.param-name;
+        subject: root.param-subject;
+        need-type: root.param-need-type;
+        top-limit: root.inset-top;
+        bottom-limit: root.kb-shown ? root.kb-y : root.height;
+        name-changed(t) => { root.param-name-changed(t); }
+        run(n, t) => { root.param-run(n, t); }
+        close => { root.param-open = false; root.dialog-error = ""; }
     }
 
     if root.file-op != 0: FileOpDialog {

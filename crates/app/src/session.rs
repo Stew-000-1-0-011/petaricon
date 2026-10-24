@@ -75,6 +75,35 @@ pub struct PropRow {
     /// What the field shows (see `field_text`).
     pub shown: String,
     pub kind: PropKind,
+    /// For a parameter of the used component (`in` / `in-out`): its type. Empty for the
+    /// element's own properties.
+    pub ty: String,
+    /// For a parameter: the default expression of the component, as the field would show it
+    /// (empty when it has none). Shown faintly while the field is empty.
+    pub placeholder: String,
+    /// Whether 引数にする is offered: the binding can become a parameter of the component
+    /// being edited.
+    pub can_param: bool,
+}
+
+/// One `in` / `in-out` property of a used component.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UseParam {
+    name: String,
+    ty: String,
+    /// The default expression as written; empty when there is none.
+    default: String,
+}
+
+/// The default expression of a property declaration (`in property <T> name: expr;`).
+fn declaration_default(decl: &str) -> String {
+    let Some(i) = decl.find('>') else { return String::new() };
+    let rest = decl[i + 1..].trim_start();
+    let rest = rest.trim_start_matches(|c: char| c.is_alphanumeric() || c == '-' || c == '_').trim_start();
+    match rest.strip_prefix(':') {
+        Some(e) => e.trim().trim_end_matches(';').trim().to_string(),
+        None => String::new(),
+    }
 }
 
 pub fn prop_kind(name: &str) -> PropKind {
@@ -950,12 +979,54 @@ impl Session {
         }
     }
 
-    /// Property rows of the selection: geometry first, then the ones that suit its kind, then
-    /// any other written binding. Empty without a selection.
+    /// The `in` / `in-out` properties of the component the selection uses, in declaration order.
+    /// Empty when the selection is not a use, or its definition cannot be found or read (a
+    /// broken import): no error is shown then.
+    fn use_params(&self) -> Vec<UseParam> {
+        let Some(target) = self.selected_use() else { return Vec::new() };
+        let info = match target {
+            UseTarget::Local(name) => self.doc.components().into_iter().find(|c| c.name == name),
+            UseTarget::Imported { path, component } => {
+                let file = match self.doc.path().parent() {
+                    Some(dir) => dir.join(path.strip_prefix("./").unwrap_or(&path)),
+                    None => return Vec::new(),
+                };
+                std::fs::read_to_string(&file).ok().and_then(|text| {
+                    Document::new(file, text).components().into_iter().find(|c| c.name == component)
+                })
+            }
+        };
+        info.map(|c| {
+            c.declarations
+                .iter()
+                .filter_map(|d| {
+                    public_property(d).map(|(name, ty)| UseParam {
+                        name,
+                        ty,
+                        default: declaration_default(d),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Property rows of the selection: geometry first, then (for a use of a component) the
+    /// component's `in` / `in-out` properties, then the ones that suit its kind, then any
+    /// other written binding. Empty without a selection.
     pub fn properties(&self) -> Vec<PropRow> {
+        self.property_rows(true)
+    }
+
+    fn property_rows(&self, flags: bool) -> Vec<PropRow> {
         let Some(info) = self.selection.as_ref().and_then(|s| self.doc.element(s)) else {
             return Vec::new();
         };
+        let params: Vec<UseParam> = self
+            .use_params()
+            .into_iter()
+            .filter(|p| !GEOMETRY_PROPS.contains(&p.name.as_str()))
+            .collect();
         let mut names: Vec<&str> = GEOMETRY_PROPS.to_vec();
         if matches!(info.kind, ElementKind::Layout(_)) {
             names.extend(LAYOUT_PROPS);
@@ -965,31 +1036,57 @@ impl Session {
             "Rectangle" => names.extend(RECTANGLE_PROPS),
             _ => {}
         }
-        let mut rows: Vec<PropRow> = names
-            .iter()
-            .map(|n| {
-                let expr = info
-                    .bindings
-                    .iter()
-                    .find(|b| b.name == *n)
-                    .map(|b| b.expr.clone())
-                    .unwrap_or_default();
-                PropRow {
-                    name: n.to_string(),
-                    shown: field_text(prop_kind(n), &expr),
-                    expr,
-                    kind: prop_kind(n),
-                }
-            })
-            .collect();
+        let written = |n: &str| {
+            info.bindings.iter().find(|b| b.name == n).map(|b| b.expr.clone()).unwrap_or_default()
+        };
+        let can_param = |n: &str, expr: &str, ty: Option<&str>| {
+            flags
+                && !expr.is_empty()
+                && ty.is_none_or(|t| DECL_TYPES.contains(&t))
+                && self.can_parameterize_as(n, ty).is_ok()
+        };
+        let plain = |n: &str| {
+            let expr = written(n);
+            PropRow {
+                name: n.to_string(),
+                shown: field_text(prop_kind(n), &expr),
+                kind: prop_kind(n),
+                ty: String::new(),
+                placeholder: String::new(),
+                can_param: can_param(n, &expr, None),
+                expr,
+            }
+        };
+        let param_row = |p: &UseParam| {
+            let kind = match p.ty.as_str() {
+                "string" => PropKind::Text,
+                "length" => PropKind::Length,
+                _ => PropKind::Other,
+            };
+            let expr = written(&p.name);
+            PropRow {
+                name: p.name.clone(),
+                shown: field_text(kind, &expr),
+                kind,
+                ty: p.ty.clone(),
+                placeholder: field_text(kind, &p.default),
+                can_param: can_param(&p.name, &expr, Some(&p.ty)),
+                expr,
+            }
+        };
+        let mut rows: Vec<PropRow> = Vec::new();
+        for (i, n) in names.iter().enumerate() {
+            if i == GEOMETRY_PROPS.len() {
+                rows.extend(params.iter().filter(|p| !names.contains(&p.name.as_str())).map(param_row));
+            }
+            rows.push(plain(n));
+        }
+        if names.len() == GEOMETRY_PROPS.len() {
+            rows.extend(params.iter().filter(|p| !names.contains(&p.name.as_str())).map(param_row));
+        }
         for b in &info.bindings {
-            if !names.contains(&b.name.as_str()) {
-                rows.push(PropRow {
-                    name: b.name.clone(),
-                    expr: b.expr.clone(),
-                    shown: field_text(prop_kind(&b.name), &b.expr),
-                    kind: prop_kind(&b.name),
-                });
+            if !names.contains(&b.name.as_str()) && !params.iter().any(|p| p.name == b.name) {
+                rows.push(plain(&b.name));
             }
         }
         rows
@@ -1005,7 +1102,9 @@ impl Session {
         let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
         self.refuse_if_mismatch()?;
         // Only the emptiness check and non-text values are trimmed: `"Hi "` keeps its space.
-        let kind = prop_kind(name);
+        let rows = self.property_rows(false);
+        let row = rows.iter().find(|r| r.name == name);
+        let kind = row.map_or_else(|| prop_kind(name), |r| r.kind);
         let value = if kind == PropKind::Text && !value.trim().is_empty() {
             value
         } else {
@@ -1016,12 +1115,7 @@ impl Session {
         } else {
             Some(normalise(kind, value).map_err(SessionError::Rejected)?)
         };
-        let current = self
-            .properties()
-            .into_iter()
-            .find(|r| r.name == name)
-            .map(|r| r.expr)
-            .unwrap_or_default();
+        let current = row.map(|r| r.expr.clone()).unwrap_or_default();
         if current == expr.clone().unwrap_or_default() {
             return Ok(());
         }
@@ -1070,6 +1164,25 @@ impl Session {
         &self,
         property: &str,
     ) -> Result<(String, Option<&'static str>), String> {
+        self.can_parameterize_as(property, self.declared_type(property))
+    }
+
+    /// The type of `property` of the selection: the one the used component declares for it,
+    /// else the one the name table gives. `None`: the user must choose (also for a declared
+    /// type that a parameter cannot have).
+    fn declared_type(&self, property: &str) -> Option<&'static str> {
+        match self.use_params().into_iter().find(|p| p.name == property) {
+            Some(p) => DECL_TYPES.iter().find(|t| **t == p.ty).copied(),
+            None => parameter_type(property),
+        }
+    }
+
+    fn can_parameterize_as(
+        &self,
+        property: &str,
+        ty: Option<&str>,
+    ) -> Result<(String, Option<&'static str>), String> {
+        let ty = ty.and_then(|t| DECL_TYPES.iter().find(|d| **d == t).copied());
         let path = self.selection.as_ref().ok_or("要素が選ばれていません")?;
         if path.component != self.component {
             return Err("部品の中を開いてから選んでください".into());
@@ -1092,7 +1205,18 @@ impl Session {
             name = format!("{first}-{n}");
             n += 1;
         }
-        Ok((name, parameter_type(property)))
+        Ok((name, ty))
+    }
+
+    /// Why `name` cannot be the name of a new parameter of the component being edited.
+    pub fn parameter_name_error(&self, name: &str) -> Option<String> {
+        if !is_identifier(name) {
+            Some("名前に使えるのは英数字・_・- だけです(先頭は英字か _)".to_string())
+        } else if self.doc.parameter_name_taken(&self.component, name) {
+            Some(format!("{name} はすでに使われています"))
+        } else {
+            None
+        }
     }
 
     /// Turns `property` of the selection into a parameter `name` of the component, in one
@@ -1115,7 +1239,8 @@ impl Session {
             Some(t) => {
                 return Err(EditError::InvalidTarget(format!("`{t}` は使えない型です")).into());
             }
-            None => parameter_type(property)
+            None => self
+                .declared_type(property)
                 .ok_or_else(|| SessionError::Rejected("型が分かりません。型を選んでください".into()))?,
         };
         self.apply_validated(Op::Parameterize {

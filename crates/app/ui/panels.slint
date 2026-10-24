@@ -12,6 +12,12 @@ export struct PropItem {
     value: string,
     // Why the last typed value was not applied; empty when it was (or nothing was typed).
     error: string,
+    // A parameter of the used component: its type (empty for the element's own properties).
+    ty: string,
+    // The component's default for a parameter, shown faintly while the field is empty.
+    placeholder: string,
+    // 引数にする is offered for this row.
+    can-param: bool,
 }
 
 export struct PreviewItem {
@@ -86,6 +92,7 @@ export component BottomPanel inherits Rectangle {
     in property <bool> touch-input;
     callback prop-edited(string, string);
     callback prop-accepted(string, string);
+    callback param-open(string);
     // A value field got focus: name, its text, and the window y of the field's bottom edge.
     callback value-focused(string, string, length);
     callback value-blurred();
@@ -192,9 +199,9 @@ export component BottomPanel inherits Rectangle {
                         x: 8px;
                         height: 44px;
                         width: 38%;
-                        text: p.name;
+                        text: p.ty == "" ? p.name : p.name + "\n" + p.ty;
                         color: p.value == "" ? #8a9199 : white;
-                        font-size: 13px;
+                        font-size: p.ty == "" ? 13px : 12px;
                         vertical-alignment: center;
                         overflow: elide;
                     }
@@ -203,7 +210,7 @@ export component BottomPanel inherits Rectangle {
                     if root.touch-input: Rectangle {
                         x: parent.width * 0.4;
                         y: 2px;
-                        width: parent.width - self.x - 6px;
+                        width: parent.width - self.x - 6px - (p.can-param ? 80px : 0px);
                         height: 40px;
                         background: #2a2e33;
                         border-radius: 4px;
@@ -212,8 +219,8 @@ export component BottomPanel inherits Rectangle {
                         Text {
                             x: 8px;
                             width: parent.width - 16px;
-                            text: p.value;
-                            color: white;
+                            text: p.value == "" ? p.placeholder : p.value;
+                            color: p.value == "" ? #6f767e : white;
                             font-size: 13px;
                             vertical-alignment: center;
                             overflow: elide;
@@ -225,9 +232,10 @@ export component BottomPanel inherits Rectangle {
                     if !root.touch-input: LineEdit {
                         x: parent.width * 0.4;
                         y: 2px;
-                        width: parent.width - self.x - 6px;
+                        width: parent.width - self.x - 6px - (p.can-param ? 80px : 0px);
                         height: 40px;
                         text: p.value;
+                        placeholder-text: p.placeholder;
                         changed has-focus => {
                             if self.has-focus {
                                 root.value-focused(p.name, self.text, row.absolute-position.y + row.height);
@@ -237,6 +245,22 @@ export component BottomPanel inherits Rectangle {
                         }
                         edited(t) => { root.prop-edited(p.name, t); }
                         accepted(t) => { root.prop-accepted(p.name, t); }
+                    }
+                    if p.can-param: Rectangle {
+                        x: parent.width - 80px;
+                        y: 2px;
+                        width: 74px;
+                        height: 40px;
+                        background: #33404d;
+                        border-radius: 4px;
+                        Text {
+                            text: "引数にする";
+                            color: #8fc7ff;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea { clicked => { root.param-open(p.name); } }
                     }
                     perr := Text {
                         x: 8px;
@@ -700,6 +724,67 @@ export component ExtractDialog inherits ModalCard {
                     root.add(root.kind, root.ty, name2.text);
                     name2.text = "";
                 }
+            }
+        }
+    }
+}
+
+// 引数にする: the name (prefilled) and, when the type is not known, the type.
+export component ParamDialog inherits ModalCard {
+    in property <string> error;
+    in property <string> initial-name;
+    in property <bool> need-type;
+    in property <string> subject;
+    callback name-changed(string);
+    callback run(string, string /* type, empty when known */);
+    callback close();
+    property <string> ty: "string";
+
+    VerticalLayout {
+        spacing: 8px;
+        Text { text: "引数にする"; color: white; font-size: 16px; }
+        Text {
+            text: root.subject;
+            color: #9aa3ad;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        Text { text: "引数の名前"; color: #9aa3ad; font-size: 12px; }
+        pname := LineEdit {
+            height: 44px;
+            text: root.initial-name;
+            edited(t) => { root.name-changed(t); }
+            accepted(t) => { if t != "" && root.error == "" { root.run(t, root.need-type ? root.ty : ""); } }
+            init => { self.focus(); }
+        }
+        if root.need-type: VerticalLayout {
+            spacing: 4px;
+            Text { text: "型"; color: #9aa3ad; font-size: 12px; }
+            for row[r] in [["string", "int", "float", "bool"], ["length", "color", "brush", "image"]]: HorizontalLayout {
+                spacing: 4px;
+                for t in row: Chip {
+                    text: t;
+                    horizontal-stretch: 1;
+                    selected: root.ty == t;
+                    clicked => { root.ty = t; }
+                }
+            }
+        }
+        Text {
+            text: root.error;
+            color: #ff8a80;
+            font-size: 12px;
+            wrap: word-wrap;
+            visible: root.error != "";
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            height: 44px;
+            ToolButton { text: "キャンセル"; clicked => { root.close(); } }
+            ToolButton {
+                text: "OK";
+                enabled: pname.text != "" && root.error == "";
+                clicked => { root.run(pname.text, root.need-type ? root.ty : ""); }
             }
         }
     }
