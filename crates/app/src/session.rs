@@ -180,6 +180,8 @@ pub struct PropRow {
     /// Shown instead of the field when the value is not typed here (a width held by a
     /// left+right / top+bottom anchor). Empty otherwise.
     pub note: String,
+    /// A small line under the name: what a typed number means (anchored right / centred).
+    pub caption: String,
 }
 
 /// One `in` / `in-out` property of a used component.
@@ -545,6 +547,14 @@ pub struct TidyReport {
 }
 
 impl TidyReport {
+    /// The toast after a Tidy: the summary, and on a second line what was left alone.
+    pub fn message(&self) -> String {
+        match &self.notice {
+            Some(n) => format!("{}\n{n}", self.summary()),
+            None => self.summary(),
+        }
+    }
+
     /// One line for the toast, e.g. `そろえ 3・等間隔 1`; kinds that did not occur are omitted.
     pub fn summary(&self) -> String {
         use tidy::free::Relation as R;
@@ -1040,6 +1050,10 @@ impl Session {
                 .doc
                 .element(path)
                 .ok_or_else(|| EditError::ElementNotFound(path.clone()))?;
+            // A layout element's own geometry is not something the user placed.
+            if matches!(info.kind, ElementKind::Layout(_)) {
+                continue;
+            }
             let rect = self.hit_of(path).ok_or(SessionError::NoGeometry)?.local;
             let (h, v) = anchor::infer_rect((size.w, size.h), &rect, tolerance);
             let pick = |axis: Axis, kind: Kind| {
@@ -1071,6 +1085,9 @@ impl Session {
                 .doc
                 .element(&p.path)
                 .ok_or_else(|| EditError::ElementNotFound(p.path.clone()))?;
+            if matches!(info.kind, ElementKind::Layout(_)) {
+                continue;
+            }
             let local = self.hit_of(&p.path).ok_or(SessionError::NoGeometry)?.local;
             let mut bindings = Vec::new();
             for (axis, kind) in [(Axis::H, p.h), (Axis::V, p.v)] {
@@ -1411,6 +1428,17 @@ impl Session {
                 String::new()
             }
         };
+        let position_caption = |n: &str| {
+            let axis = match n {
+                "x" => Axis::H,
+                "y" => Axis::V,
+                _ => return String::new(),
+            };
+            match anchor_of(&info, axis) {
+                Anchor::End(_) | Anchor::Center(_) if free => "数を入れると位置".to_string(),
+                _ => String::new(),
+            }
+        };
         let plain = |n: &str| {
             let expr = written(n);
             PropRow {
@@ -1419,8 +1447,9 @@ impl Session {
                 kind: prop_kind(n),
                 ty: String::new(),
                 placeholder: String::new(),
-                can_param: can_param(n, &expr, None),
+                can_param: can_param(n, &expr, None) && stretch_note(n).is_empty(),
                 note: stretch_note(n),
+                caption: position_caption(n),
                 expr,
             }
         };
@@ -1439,6 +1468,7 @@ impl Session {
                 placeholder: field_text(kind, &p.default),
                 can_param: can_param(&p.name, &expr, Some(&p.ty)),
                 note: String::new(),
+                caption: String::new(),
                 expr,
             }
         };
@@ -2194,14 +2224,17 @@ impl Session {
         }
         skipped.dedup();
         let notice = (!skipped.is_empty()).then(|| {
-            let names: Vec<String> = skipped
+            let mut names: Vec<String> = skipped
                 .iter()
                 .map(|p| {
                     let ty = self.doc.element(p).map(|i| i.type_name).unwrap_or_default();
                     format!("{ty} #{}", p.indices.last().map_or(0, |i| i + 1))
                 })
                 .collect();
-            format!("式で書かれた軸は動かしませんでした: {}", names.join("、"))
+            let more = names.len().saturating_sub(3);
+            names.truncate(3);
+            let tail = if more > 0 { format!("…ほか {more} 件") } else { String::new() };
+            format!("式で書かれた軸は動かしませんでした: {}{tail}", names.join("、"))
         });
         Ok(TidyReport {
             notice,

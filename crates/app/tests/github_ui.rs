@@ -849,3 +849,30 @@ fn a_worker_that_dies_mid_clone_leaves_no_new_folder_but_keeps_an_old_one() {
     wait(e);
     assert!(env.root().join("ui").is_dir());
 }
+
+#[test]
+fn anchor_edits_are_refused_while_the_project_is_locked() {
+    let env = setup(Some(TOKEN));
+    let e = &env.editor;
+    linked(&env);
+    e.invoke_gh_open();
+    env.fake().commit("dev", &[("crates/ui/main.slint", Some(SRC2.as_bytes()))]);
+    let (at_call, release) = arm(&env);
+    e.invoke_gh_pull();
+    reached(&at_call);
+    let on_disk = project_text(&env, "ui");
+    let z = e.get_zoom_level();
+    e.invoke_tapped(60. * z, 60. * z);
+    assert!(e.get_has_selection());
+    e.invoke_anchor_chosen(0, 1);
+    assert_eq!(e.get_error_text().as_str(), LOCKED);
+    assert!(!e.get_dirty());
+    e.invoke_anchor_chosen(1, 3);
+    assert_eq!(e.get_error_text().as_str(), LOCKED);
+    e.invoke_infer_run();
+    assert_eq!(e.get_error_text().as_str(), LOCKED);
+    assert!(!e.get_dirty());
+    assert_eq!(project_text(&env, "ui"), on_disk);
+    release.send(()).unwrap();
+    wait(e);
+}

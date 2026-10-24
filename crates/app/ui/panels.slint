@@ -20,6 +20,8 @@ export struct PropItem {
     can-param: bool,
     // Shown instead of the field (e.g. 左右に付いています); empty: the field.
     note: string,
+    // A small line under the name; empty: none.
+    caption: string,
 }
 
 // One line of the 付き方を推定 list: the child and the anchors proposed (empty: unchanged).
@@ -263,9 +265,9 @@ export component BottomPanel inherits Rectangle {
                         x: 8px;
                         height: 44px;
                         width: 38%;
-                        text: p.ty == "" ? p.name : p.name + "\n" + p.ty;
+                        text: p.ty != "" ? p.name + "\n" + p.ty : p.caption != "" ? p.name + "\n" + p.caption : p.name;
                         color: p.value == "" ? #8a9199 : white;
-                        font-size: p.ty == "" ? 13px : 12px;
+                        font-size: p.ty == "" && p.caption == "" ? 13px : 12px;
                         vertical-alignment: center;
                         overflow: elide;
                     }

@@ -31,6 +31,8 @@ pub const TIDY_TOLERANCE_MIN: i32 = 4;
 pub const TIDY_TOLERANCE_MAX: i32 = 48;
 pub const TIDY_TOLERANCE_STEP: i32 = 4;
 const TOAST_TIME: Duration = Duration::from_secs(3);
+/// A toast with a second line takes longer to read.
+const TOAST_TIME_LONG: Duration = Duration::from_secs(5);
 
 thread_local! {
     static SAVE_HOOK: RefCell<Option<Rc<dyn Fn() -> bool>>> = const { RefCell::new(None) };
@@ -433,6 +435,7 @@ impl Glue {
                 placeholder: r.placeholder.into(),
                 can_param: r.can_param,
                 note: r.note.into(),
+                caption: r.caption.into(),
             })
             .collect();
         let ed = self.editor();
@@ -682,6 +685,9 @@ impl Glue {
 
     /// Removes the Tidy overlay (any edit, selection change, tab change, undo or redo).
     fn clear_tidy(&mut self) {
+        // A list shown by 付き方を推定 describes the document as it was: drop it too.
+        self.infer_proposals.clear();
+        self.editor().set_infer_open(false);
         if self.tidy_report.take().is_some() {
             self.update_tidy_marks();
         }
@@ -696,20 +702,13 @@ impl Glue {
             Ok(report) => {
                 if report.changed > 0 {
                     self.rebuild();
-                    let mut text = report.summary();
-                    if let Some(n) = &report.notice {
-                        text = format!("{text}\n{n}");
-                    }
+                    let text = report.message();
                     self.tidy_report = Some(report);
                     self.update_overlay();
                     self.toast(&text);
                 } else {
                     self.clear_tidy();
-                    let mut text = report.summary();
-                    if let Some(n) = &report.notice {
-                        text = format!("{text}\n{n}");
-                    }
-                    self.toast(&text);
+                    self.toast(&report.message());
                 }
             }
             Err(e) => self.set_error(&e.to_string()),
@@ -783,7 +782,8 @@ impl Glue {
     fn toast(&mut self, text: &str) {
         self.editor().set_toast_text(text.into());
         let me = self.me.clone();
-        self.toast_timer.start(slint::TimerMode::SingleShot, TOAST_TIME, move || {
+        let time = if text.contains('\n') { TOAST_TIME_LONG } else { TOAST_TIME };
+        self.toast_timer.start(slint::TimerMode::SingleShot, time, move || {
             if let Some(g) = me.upgrade()
                 && let Ok(g) = g.try_borrow()
             {

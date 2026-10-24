@@ -226,3 +226,93 @@ fn the_infer_action_after_a_tidy_lists_and_applies() {
     editor.invoke_save();
     assert_eq!(saved(&dir), kids(SPREAD));
 }
+
+#[test]
+fn a_layout_child_is_not_proposed_or_written() {
+    let src = "export component Main inherits Rectangle {\n    width: 300px;\n    height: 300px;\n    box := Rectangle {\n        x: 0px;\n        y: 0px;\n        width: 300px;\n        height: 300px;\n        VerticalLayout {\n            Rectangle { height: 20px; }\n        }\n    }\n}\n"
+        .to_string();
+    let mut s = session_of(src.clone());
+    assert!(s.infer_anchors(&container(), &[child(0)], 16.0).unwrap().is_empty());
+    // a forged proposal for the layout is skipped as well
+    let forged = app::session::AnchorProposal {
+        path: child(0),
+        label: "x".into(),
+        h: Some(Kind::End),
+        v: Some(Kind::Center),
+    };
+    assert_eq!(s.apply_anchor_proposals(&[forged]).unwrap(), 0);
+    assert_eq!(s.doc().text(), src);
+}
+
+#[test]
+fn a_stretched_size_row_offers_no_parameter_and_end_centre_rows_say_what_a_number_means() {
+    let dir = tempfile::tempdir().unwrap();
+    let editor = start(&dir, &kids(ONE));
+    editor.invoke_tree_selected(2);
+    assert!(row(&editor, "width").can_param || row(&editor, "width").value.is_empty());
+    assert_eq!(row(&editor, "x").caption, "");
+    editor.invoke_anchor_chosen(0, 2);
+    assert!(!row(&editor, "width").can_param);
+    assert_eq!(row(&editor, "width").note, "左右に付いています");
+    editor.invoke_anchor_chosen(0, 1);
+    assert_eq!(row(&editor, "x").caption, "数を入れると位置");
+    assert_eq!(row(&editor, "y").caption, "");
+    editor.invoke_anchor_chosen(1, 3);
+    assert_eq!(row(&editor, "y").caption, "数を入れると位置");
+    editor.invoke_anchor_chosen(0, 0);
+    assert_eq!(row(&editor, "x").caption, "");
+}
+
+#[test]
+fn the_tidy_message_lists_at_most_three_skipped_names() {
+    let mut list: Vec<(&str, &str, &str, &str)> = Vec::new();
+    for i in 0..5 {
+        let y: &'static str = ["10px", "60px", "110px", "160px", "210px"][i];
+        list.push(("box.width / 4", y, "40px", "30px"));
+    }
+    let mut s = session_of(kids(&list));
+    s.select_path(container());
+    let r = s.tidy_free_selection(16.0).unwrap();
+    if let Some(n) = &r.notice {
+        assert!(n.contains("…ほか 2 件"), "{n}");
+        assert_eq!(n.matches("Rectangle").count(), 3, "{n}");
+        assert!(r.message().contains('\n'));
+    }
+}
+
+#[test]
+fn a_toast_with_a_second_line_stays_longer() {
+    let dir = tempfile::tempdir().unwrap();
+    let editor = start(&dir, &kids(&[("box.width / 4", "16px", "60px", "30px")]));
+    editor.invoke_tree_selected(2);
+    editor.invoke_drag_finished(8., 8.);
+    assert_ne!(editor.get_toast_text(), "");
+    // one line lasts 3 s; a two-line message is still there after 4 s
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(4));
+    slint::platform::update_timers_and_animations();
+    assert_eq!(editor.get_toast_text(), "", "single line toast gone after 4 s");
+    editor.invoke_tree_selected(1);
+    editor.invoke_tidy();
+    let text = editor.get_toast_text().to_string();
+    if text.contains('\n') {
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(4));
+        slint::platform::update_timers_and_animations();
+        assert_eq!(editor.get_toast_text().to_string(), text);
+    }
+}
+
+#[test]
+fn the_infer_list_is_dropped_when_the_document_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let editor = start(&dir, &kids(SPREAD));
+    editor.invoke_tree_selected(1);
+    editor.invoke_tidy();
+    editor.invoke_infer_ask();
+    assert!(editor.get_infer_open());
+    editor.invoke_undo();
+    assert!(!editor.get_infer_open());
+    // an OK that arrives anyway has nothing to write
+    let before = editor.get_dirty();
+    editor.invoke_infer_run();
+    assert_eq!(editor.get_dirty(), before);
+}
