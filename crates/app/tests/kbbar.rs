@@ -61,7 +61,8 @@ fn open_bar(editor: &app::Editor) {
     slint::platform::update_timers_and_animations();
     // Portrait: toolbar 2 rows (104) + panel is the bottom 40% of the rest; handle 18, tabs 44.
     let top = 760.0 - (760.0 - 104.0) * 0.4;
-    click(editor, 250., top + 18.0 + 44.0 + 22.0);
+    // The anchor chooser (two 48px rows) comes first, then the x field.
+    click(editor, 250., top + 18.0 + 44.0 + 96.0 + 22.0);
     assert!(editor.get_bar_visible(), "bar should open for a covered field");
 }
 

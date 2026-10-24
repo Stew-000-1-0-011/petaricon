@@ -49,6 +49,30 @@ fn span(r: &tidy::Rect, axis: Axis) -> (f32, f32) {
     }
 }
 
+/// The bindings that switch `axis` of `info` to `kind` while the element stays at `local`
+/// inside a container of length `parent`. Leaving `Stretch`, or an expression, the size that
+/// was an expression becomes the length it has now.
+fn switch_bindings(
+    info: &ElementInfo,
+    axis: Axis,
+    kind: Kind,
+    local: &tidy::Rect,
+    parent: f32,
+) -> Vec<Binding> {
+    let current = anchor_of(info, axis);
+    let (pos, size) = span(local, axis);
+    let anchor = anchor::solve(kind, f64::from(pos), f64::from(size), f64::from(parent));
+    let written_size = info
+        .bindings
+        .iter()
+        .find(|b| b.name == axis.size())
+        .map(|b| b.expr.trim())
+        .unwrap_or_default();
+    let odd_size = !written_size.is_empty() && anchor::plain_length(written_size).is_none();
+    let size_px = (matches!(current, Anchor::Stretch(..)) || odd_size).then_some(size);
+    anchor_bindings(axis, anchor, size_px)
+}
+
 /// A binding to write: the property and its new expression (`None` removes it).
 type Binding = (String, Option<String>);
 
@@ -153,6 +177,9 @@ pub struct PropRow {
     /// Whether 引数にする is offered: the binding can become a parameter of the component
     /// being edited.
     pub can_param: bool,
+    /// Shown instead of the field when the value is not typed here (a width held by a
+    /// left+right / top+bottom anchor). Empty otherwise.
+    pub note: String,
 }
 
 /// One `in` / `in-out` property of a used component.
@@ -492,6 +519,16 @@ pub fn declaration_text(kind: DeclKind, ty: &str, name: &str) -> String {
         DeclKind::OutProperty => format!("out property <{ty}> {name};"),
         DeclKind::Callback => format!("callback {name}();"),
     }
+}
+
+/// The anchors proposed for one child by `Session::infer_anchors`; `None` leaves the axis as
+/// it is (already that anchor, or written as an expression).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnchorProposal {
+    pub path: ElementPath,
+    pub label: String,
+    pub h: Option<Kind>,
+    pub v: Option<Kind>,
 }
 
 /// What a free Tidy did: the relations it found (member indices refer to `children`) and how
@@ -973,21 +1010,91 @@ impl Session {
         if current.kind() == Some(kind) {
             return Ok(());
         }
-        let (pos, size) = span(&hit.local, axis);
         let parent = self.need_parent_length(&path, axis)?;
-        let anchor = anchor::solve(kind, f64::from(pos), f64::from(size), parent);
-        // Leaving `Stretch`, or an expression, the size that was an expression becomes the
-        // length it has now.
-        let written_size = info
-            .bindings
-            .iter()
-            .find(|b| b.name == axis.size())
-            .map(|b| b.expr.trim())
-            .unwrap_or_default();
-        let odd_size = !written_size.is_empty() && anchor::plain_length(written_size).is_none();
-        let size_px = (matches!(current, Anchor::Stretch(..)) || odd_size).then_some(size);
-        let bindings = anchor_bindings(axis, anchor, size_px);
+        let bindings = switch_bindings(&info, axis, kind, &hit.local, parent as f32);
         self.apply_validated(Op::SetBindings { path, bindings })
+    }
+
+    /// The anchors the children of `container` seem to have, from where they are in the
+    /// preview (see `anchor::infer`). Children in a layout and axes written as expressions
+    /// are left out, as are axes that already have the inferred anchor; a child with nothing
+    /// to change is not listed.
+    pub fn infer_anchors(
+        &self,
+        container: &ElementPath,
+        children: &[ElementPath],
+        tolerance: f32,
+    ) -> Result<Vec<AnchorProposal>, SessionError> {
+        self.refuse_if_mismatch()?;
+        let cinfo = self
+            .doc
+            .element(container)
+            .ok_or_else(|| EditError::ElementNotFound(container.clone()))?;
+        if matches!(cinfo.kind, ElementKind::Layout(_)) {
+            return Ok(Vec::new());
+        }
+        let size = self.hit_of(container).ok_or(SessionError::NoGeometry)?.local;
+        let mut out = Vec::new();
+        for path in children {
+            let info = self
+                .doc
+                .element(path)
+                .ok_or_else(|| EditError::ElementNotFound(path.clone()))?;
+            let rect = self.hit_of(path).ok_or(SessionError::NoGeometry)?.local;
+            let (h, v) = anchor::infer_rect((size.w, size.h), &rect, tolerance);
+            let pick = |axis: Axis, kind: Kind| {
+                let cur = anchor_of(&info, axis);
+                (cur != Anchor::Expr && cur.kind() != Some(kind)).then_some(kind)
+            };
+            let (h, v) = (pick(Axis::H, h), pick(Axis::V, v));
+            if h.is_none() && v.is_none() {
+                continue;
+            }
+            let label = format!("{} #{}", info.type_name, path.indices.last().map_or(0, |i| i + 1));
+            out.push(AnchorProposal { path: path.clone(), label, h, v });
+        }
+        Ok(out)
+    }
+
+    /// Writes all `proposals` as one history step, keeping every child where it is on
+    /// screen. Checked like any property edit (nothing changes when it is refused). Returns
+    /// how many children were rewritten.
+    pub fn apply_anchor_proposals(
+        &mut self,
+        proposals: &[AnchorProposal],
+    ) -> Result<usize, SessionError> {
+        self.refuse_if_mismatch()?;
+        let mut scratch = self.snapshot_doc();
+        let mut changed = 0;
+        for p in proposals {
+            let info = self
+                .doc
+                .element(&p.path)
+                .ok_or_else(|| EditError::ElementNotFound(p.path.clone()))?;
+            let local = self.hit_of(&p.path).ok_or(SessionError::NoGeometry)?.local;
+            let mut bindings = Vec::new();
+            for (axis, kind) in [(Axis::H, p.h), (Axis::V, p.v)] {
+                let Some(kind) = kind else { continue };
+                let cur = anchor_of(&info, axis);
+                if cur == Anchor::Expr || cur.kind() == Some(kind) {
+                    continue;
+                }
+                let parent = self.parent_length(&p.path, axis).ok_or(SessionError::NoGeometry)?;
+                bindings.extend(switch_bindings(&info, axis, kind, &local, parent));
+            }
+            if bindings.is_empty() {
+                continue;
+            }
+            changed += 1;
+            scratch.apply(Op::SetBindings { path: p.path.clone(), bindings })?;
+        }
+        if changed > 0 {
+            let text = scratch.text().to_string();
+            let built = self.check_text(&text)?;
+            self.doc.replace_text(text.clone());
+            self.keep_compile(text, built);
+        }
+        Ok(changed)
     }
 
     pub fn move_selection(&mut self, dx: f32, dy: f32) -> Result<(), SessionError> {
@@ -1291,6 +1398,19 @@ impl Session {
                 && ty.is_none_or(|t| DECL_TYPES.contains(&t))
                 && self.can_parameterize_as(n, ty).is_ok()
         };
+        let free = self.can_set_anchor();
+        let stretch_note = |n: &str| {
+            let (axis, text) = match n {
+                "width" => (Axis::H, "左右に付いています"),
+                "height" => (Axis::V, "上下に付いています"),
+                _ => return String::new(),
+            };
+            if free && matches!(anchor_of(&info, axis), Anchor::Stretch(..)) {
+                text.to_string()
+            } else {
+                String::new()
+            }
+        };
         let plain = |n: &str| {
             let expr = written(n);
             PropRow {
@@ -1300,6 +1420,7 @@ impl Session {
                 ty: String::new(),
                 placeholder: String::new(),
                 can_param: can_param(n, &expr, None),
+                note: stretch_note(n),
                 expr,
             }
         };
@@ -1317,6 +1438,7 @@ impl Session {
                 ty: p.ty.clone(),
                 placeholder: field_text(kind, &p.default),
                 can_param: can_param(&p.name, &expr, Some(&p.ty)),
+                note: String::new(),
                 expr,
             }
         };

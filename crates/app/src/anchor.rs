@@ -175,6 +175,30 @@ pub fn solve(kind: Kind, pos: f64, size: f64, parent: f64) -> Anchor {
     }
 }
 
+/// The anchor kind a child at `pos` with `size` along an axis of length `len` seems to have
+/// (design spec 1.5). Margins are the gaps to the container's edges; `tolerance` is like
+/// tidy's. Spanning wins over centred (a bar with equal small margins is left+right).
+pub fn infer(len: f32, pos: f32, size: f32, tolerance: f32) -> Kind {
+    let (start, end) = (pos, len - pos - size);
+    if start <= tolerance && end <= tolerance && size >= len / 2.0 {
+        Kind::Stretch
+    } else if (start - end).abs() <= tolerance {
+        Kind::Center
+    } else if end < start - tolerance {
+        Kind::End
+    } else {
+        Kind::Start
+    }
+}
+
+/// `infer` for both axes of `rect` in a container of `(width, height)`.
+pub fn infer_rect(container: (f32, f32), rect: &tidy::Rect, tolerance: f32) -> (Kind, Kind) {
+    (
+        infer(container.0, rect.x, rect.w, tolerance),
+        infer(container.1, rect.y, rect.h, tolerance),
+    )
+}
+
 /// Where an anchor puts an element of `size` in a parent of length `parent`: `(pos, size)`.
 pub fn place(anchor: Anchor, size: f64, parent: f64) -> Option<(f64, f64)> {
     Some(match anchor {
@@ -294,5 +318,48 @@ mod tests {
         assert_eq!(place(Anchor::End(10.0), 20.0, 300.0), Some((270.0, 20.0)));
         assert_eq!(place(Anchor::Stretch(10.0, 10.0), 20.0, 300.0), Some((10.0, 280.0)));
         assert_eq!(place(Anchor::Center(0.0), 20.0, 300.0), Some((140.0, 20.0)));
+    }
+}
+
+#[cfg(test)]
+mod infer_tests {
+    use super::*;
+
+    const TOL: f32 = 16.0;
+
+    #[test]
+    fn centred_right_hugging_spanning_and_default_left() {
+        // container 300 long, element 40 long
+        assert_eq!(infer(300.0, 130.0, 40.0, TOL), Kind::Center);
+        assert_eq!(infer(300.0, 135.0, 40.0, TOL), Kind::Center); // 5px off is within tolerance
+        assert_eq!(infer(300.0, 250.0, 40.0, TOL), Kind::End);
+        assert_eq!(infer(300.0, 10.0, 280.0, TOL), Kind::Stretch);
+        assert_eq!(infer(300.0, 0.0, 300.0, TOL), Kind::Stretch);
+        assert_eq!(infer(300.0, 10.0, 40.0, TOL), Kind::Start);
+        assert_eq!(infer(300.0, 60.0, 40.0, TOL), Kind::Start);
+    }
+
+    #[test]
+    fn a_wide_element_with_one_big_margin_is_not_spanning() {
+        assert_eq!(infer(300.0, 10.0, 200.0, TOL), Kind::Start);
+        // small margins but a narrow element: right-hugging only if clearly nearer the end
+        assert_eq!(infer(300.0, 30.0, 40.0, TOL), Kind::Start);
+        // equal margins larger than the tolerance, wide: centred, not spanning
+        assert_eq!(infer(300.0, 50.0, 200.0, TOL), Kind::Center);
+    }
+
+    #[test]
+    fn tolerance_decides() {
+        // margins 20 and 30: apart by 10
+        assert_eq!(infer(300.0, 20.0, 250.0, 8.0), Kind::Start);
+        assert_eq!(infer(300.0, 20.0, 250.0, 12.0), Kind::Center);
+        // right margin only a little smaller: still Start under a large tolerance
+        assert_eq!(infer(300.0, 40.0, 200.0, 30.0), Kind::Center);
+    }
+
+    #[test]
+    fn both_axes() {
+        let r = tidy::Rect { x: 250.0, y: 130.0, w: 40.0, h: 30.0 };
+        assert_eq!(infer_rect((300.0, 300.0), &r, TOL), (Kind::End, Kind::Center));
     }
 }

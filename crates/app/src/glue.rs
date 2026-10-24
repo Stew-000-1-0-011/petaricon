@@ -14,7 +14,7 @@ use crate::lockstore::{LOCKED_TEXT, LockedStore, SharedLock};
 use crate::nav::{self, Nav};
 use crate::session::{Corner, PreviewKind, Session, TidyReport, TreeAction, TreeRow, parse_screen_size};
 use crate::tidy_overlay::{self, MarkKind};
-use crate::{Editor, GuideBand, PreviewItem, PropItem, TidyMark, TreeRowItem};
+use crate::{Editor, GuideBand, InferItem, PreviewItem, PropItem, TidyMark, TreeRowItem};
 
 mod gh;
 
@@ -272,6 +272,8 @@ pub struct Glue {
     nav: Nav,
     /// The last Tidy, drawn over the canvas until the next edit or selection change.
     tidy_report: Option<TidyReport>,
+    /// What 付き方を推定 proposed, while its dialog is open.
+    infer_proposals: Vec<crate::session::AnchorProposal>,
     /// Makes the GitHub client (a fake in tests).
     api: ApiFactory,
     /// The GitHub transfer in flight, if any.
@@ -430,6 +432,7 @@ impl Glue {
                 ty: r.ty.into(),
                 placeholder: r.placeholder.into(),
                 can_param: r.can_param,
+                note: r.note.into(),
             })
             .collect();
         let ed = self.editor();
@@ -558,6 +561,95 @@ impl Glue {
         }
         self.update_guides();
         self.update_tidy_marks();
+        self.update_anchors();
+    }
+
+    /// The anchor chooser and the pins: only for a free-placed child (not in a layout).
+    fn update_anchors(&self) {
+        let index = |a: crate::anchor::Anchor| a.kind().map_or(4, |k| k as i32);
+        let (h, v) = match self.session.anchors() {
+            Some((h, v)) if self.session.can_set_anchor() => (index(h), index(v)),
+            _ => (-1, -1),
+        };
+        let ed = self.editor();
+        ed.set_anchor_h(h);
+        ed.set_anchor_v(v);
+    }
+
+    fn anchor_chosen(&mut self, axis: i32, kind: i32) {
+        use crate::anchor::{Axis, Kind};
+        self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
+        let axis = if axis == 0 { Axis::H } else { Axis::V };
+        let kind = match kind {
+            0 => Kind::Start,
+            1 => Kind::End,
+            2 => Kind::Stretch,
+            _ => Kind::Center,
+        };
+        let r = self.session.set_anchor(axis, kind);
+        self.after_edit(r);
+    }
+
+    fn infer_ask(&mut self) {
+        self.begin_action();
+        let Some(report) = self.tidy_report.clone() else { return };
+        match self.session.infer_anchors(&report.container, &report.children, self.tolerance as f32) {
+            Ok(list) if list.is_empty() => self.toast("付き方を変える子はありません"),
+            Ok(list) => {
+                let name = |h: bool, k: Option<crate::anchor::Kind>| {
+                    use crate::anchor::Kind::*;
+                    match (k, h) {
+                        (None, _) => "",
+                        (Some(Start), true) => "左",
+                        (Some(Start), false) => "上",
+                        (Some(End), true) => "右",
+                        (Some(End), false) => "下",
+                        (Some(Stretch), true) => "左右",
+                        (Some(Stretch), false) => "上下",
+                        (Some(Center), _) => "中央",
+                    }
+                };
+                let rows: Vec<InferItem> = list
+                    .iter()
+                    .map(|p| InferItem {
+                        label: p.label.as_str().into(),
+                        h: name(true, p.h).into(),
+                        v: name(false, p.v).into(),
+                    })
+                    .collect();
+                self.infer_proposals = list;
+                let ed = self.editor();
+                ed.set_infer_rows(ModelRc::new(VecModel::from(rows)));
+                ed.set_infer_open(true);
+            }
+            Err(e) => self.set_error(&e.to_string()),
+        }
+    }
+
+    fn infer_run(&mut self) {
+        self.begin_action();
+        self.editor().set_infer_open(false);
+        let list = std::mem::take(&mut self.infer_proposals);
+        if self.edit_refused() {
+            return;
+        }
+        match self.session.apply_anchor_proposals(&list) {
+            Ok(n) => {
+                self.rebuild();
+                self.toast(&format!("{n} 件の付き方を書き換えました"));
+            }
+            Err(e) => self.set_error(&e.to_string()),
+        }
+    }
+
+    /// Shows what the last drag or resize left alone (axes written as expressions).
+    fn show_notice(&mut self) {
+        if let Some(text) = self.session.take_notice() {
+            self.toast(&text);
+        }
     }
 
     fn update_tidy_marks(&self) {
@@ -585,6 +677,7 @@ impl Glue {
             })
             .collect();
         self.editor().set_tidy_marks(ModelRc::new(VecModel::from(items)));
+        self.editor().set_can_infer(self.tidy_report.is_some());
     }
 
     /// Removes the Tidy overlay (any edit, selection change, tab change, undo or redo).
@@ -603,13 +696,20 @@ impl Glue {
             Ok(report) => {
                 if report.changed > 0 {
                     self.rebuild();
-                    let text = report.summary();
+                    let mut text = report.summary();
+                    if let Some(n) = &report.notice {
+                        text = format!("{text}\n{n}");
+                    }
                     self.tidy_report = Some(report);
                     self.update_overlay();
                     self.toast(&text);
                 } else {
                     self.clear_tidy();
-                    self.toast(&report.summary());
+                    let mut text = report.summary();
+                    if let Some(n) = &report.notice {
+                        text = format!("{text}\n{n}");
+                    }
+                    self.toast(&text);
                 }
             }
             Err(e) => self.set_error(&e.to_string()),
@@ -941,6 +1041,7 @@ impl Glue {
         }
         let r = self.session.move_selection(dx / self.zoom, dy / self.zoom);
         self.after_edit(r);
+        self.show_notice();
     }
 
     fn resize_finished(&mut self, corner: i32, dx: f32, dy: f32) {
@@ -952,6 +1053,7 @@ impl Glue {
             .session
             .resize_selection(corner_from(corner), dx / self.zoom, dy / self.zoom);
         self.after_edit(r);
+        self.show_notice();
     }
 
     fn history(&mut self, undo: bool) {
@@ -1667,6 +1769,9 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_tidy, |g| g.tidy());
     on!(on_tolerance_step, |g, d| g.tolerance_step(d));
     on!(on_overlay_clear, |g| g.clear_tidy());
+    on!(on_anchor_chosen, |g, a, k| g.anchor_chosen(a, k));
+    on!(on_infer_ask, |g| g.infer_ask());
+    on!(on_infer_run, |g| g.infer_run());
     on!(on_stack, |g| g.stack());
     on!(on_unstack, |g| g.unstack());
     on!(on_extract_open, |g| g.extract_open());
@@ -1737,6 +1842,7 @@ pub fn start_with(
             guide_target: RefCell::new(None),
             tolerance,
             tidy_report: None,
+            infer_proposals: Vec::new(),
             nav: Nav::default(),
             api,
             gh_job: None,

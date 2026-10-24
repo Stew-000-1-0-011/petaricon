@@ -1,8 +1,8 @@
 import { Palette } from "std-widgets.slint";
 import { Canvas, GuideBand, TidyMark } from "canvas.slint";
-import { BottomPanel, KbBar, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, PreviewItem, ExtractDialog, ParamDialog, RecoveryDialog, FileActions, FileOpDialog, SettingsSection, GitHubActions } from "panels.slint";
+import { BottomPanel, KbBar, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, PreviewItem, ExtractDialog, ParamDialog, InferDialog, InferItem, RecoveryDialog, FileActions, FileOpDialog, SettingsSection, GitHubActions } from "panels.slint";
 import { GitHubDialog } from "github.slint";
-export { TreeRowItem, PropItem, PreviewItem, GuideBand, TidyMark }
+export { TreeRowItem, PropItem, PreviewItem, GuideBand, TidyMark, InferItem }
 
 export component Editor inherits Window {
     title: "Petaricon Editor";
@@ -69,6 +69,17 @@ export component Editor inherits Window {
     in property <length> a-h;
     in property <string> toast-text;
     in property <[TidyMark]> tidy-marks;
+    // Anchor of the selection per axis: -1 not applicable (root, layout child), 0..3 left /
+    // right / both / centre (top / bottom / both / centre), 4 an expression.
+    in property <int> anchor-h: -1;
+    in property <int> anchor-v: -1;
+    callback anchor-chosen(int, int);
+    // After a free Tidy: 付き方を推定 is offered; the dialog lists what it would write.
+    in property <bool> can-infer;
+    in-out property <bool> infer-open;
+    in property <[InferItem]> infer-rows;
+    callback infer-ask();
+    callback infer-run();
     // Tolerance of Tidy in px (4..48, set in the menu).
     in property <int> tidy-tolerance: 16;
     in property <int> guides-rev;
@@ -447,6 +458,8 @@ export component Editor inherits Window {
         bands: root.bands;
         has-align: root.has-align;
         tidy-marks: root.tidy-marks;
+        pin-h: root.anchor-h;
+        pin-v: root.anchor-v;
         a-x: root.a-x;
         a-y: root.a-y;
         a-w: root.a-w;
@@ -469,6 +482,9 @@ export component Editor inherits Window {
         tree-rows: root.tree-rows;
         palette: root.palette;
         props: root.props;
+        anchor-h: root.anchor-h;
+        anchor-v: root.anchor-v;
+        anchor-chosen(a, k) => { root.anchor-chosen(a, k); }
         preview-props: root.preview-props;
         screen-w: root.screen-w;
         screen-h: root.screen-h;
@@ -497,6 +513,23 @@ export component Editor inherits Window {
         tree-selected(i) => { root.tree-selected(i); }
         tree-action(a) => { root.tree-action(a); }
         palette-picked(n) => { root.palette-picked(n); }
+    }
+
+    if root.can-infer: Rectangle {
+        x: cv.x + 8px;
+        y: cv.y + cv.height - self.height - 8px;
+        width: 132px;
+        height: 44px;
+        border-radius: 22px;
+        background: infer-ta.pressed ? #2f8f6f : #00a878;
+        Text {
+            text: "付き方を推定";
+            color: white;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        infer-ta := TouchArea { clicked => { root.infer-ask(); } }
     }
 
     if root.kb-shown && root.fake-keyboard > 0px: Rectangle {
@@ -649,6 +682,13 @@ export component Editor inherits Window {
                 ToolButton { text: "Close"; height: 44px; clicked => { root.menu-open = false; } }
             }
         }
+    }
+
+    if root.infer-open: InferDialog {
+        rows: root.infer-rows;
+        top-limit: root.inset-top;
+        accepted => { root.infer-run(); }
+        close => { root.infer-open = false; }
     }
 
     if root.extract-step != 0: ExtractDialog {

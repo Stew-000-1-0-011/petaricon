@@ -18,6 +18,15 @@ export struct PropItem {
     placeholder: string,
     // 引数にする is offered for this row.
     can-param: bool,
+    // Shown instead of the field (e.g. 左右に付いています); empty: the field.
+    note: string,
+}
+
+// One line of the 付き方を推定 list: the child and the anchors proposed (empty: unchanged).
+export struct InferItem {
+    label: string,
+    h: string,
+    v: string,
 }
 
 export struct PreviewItem {
@@ -69,6 +78,44 @@ export component Chip inherits Rectangle {
     ta := TouchArea { clicked => { root.clicked(); } }
 }
 
+// The chooser of one axis' anchor: 左/右/左右/中央 (上/下/上下/中央), and 式 while the axis is
+// written as some other expression (choosing a chip replaces it).
+export component AnchorRow inherits Rectangle {
+    // 0 horizontal, 1 vertical
+    in property <int> axis;
+    // 0..3, or 4 for an expression
+    in property <int> current;
+    callback chosen(int /* axis */, int /* kind */);
+    height: 48px;
+    Text {
+        x: 8px;
+        width: 40px;
+        height: 44px;
+        text: root.axis == 0 ? "横" : "縦";
+        color: white;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+    HorizontalLayout {
+        x: 48px;
+        y: 2px;
+        width: parent.width - 48px - 6px;
+        height: 44px;
+        spacing: 4px;
+        for name[k] in (root.axis == 0 ? ["左", "右", "左右", "中央"] : ["上", "下", "上下", "中央"]): Chip {
+            horizontal-stretch: 1;
+            text: name;
+            selected: root.current == k;
+            clicked => { root.chosen(root.axis, k); }
+        }
+        if root.current == 4: Chip {
+            horizontal-stretch: 1;
+            text: "式";
+            selected: true;
+        }
+    }
+}
+
 // The bottom panel: tab strip and (for now empty) content areas.
 export component BottomPanel inherits Rectangle {
     // Height the panel is dragged to; only used in portrait.
@@ -90,6 +137,10 @@ export component BottomPanel inherits Rectangle {
     // How far the on-screen keyboard reaches into the bottom of this panel.
     in property <length> kb-overlap;
     in property <bool> touch-input;
+    // Anchor of the selection per axis: -1 not applicable, 0..3 (see anchor-names), 4 式.
+    in property <int> anchor-h: -1;
+    in property <int> anchor-v: -1;
+    callback anchor-chosen(int /* axis: 0 horizontal, 1 vertical */, int /* kind */);
     callback prop-edited(string, string);
     callback prop-accepted(string, string);
     callback param-open(string);
@@ -192,7 +243,20 @@ export component BottomPanel inherits Rectangle {
                     TouchArea { clicked => { root.palette-picked(name); } }
                 }
             }
-            if root.tab == 2: ListView {
+            if root.tab == 2: Flickable {
+                content-height: props-col.preferred-height;
+                props-col := VerticalLayout {
+                alignment: start;
+                if root.anchor-h >= 0: AnchorRow {
+                    axis: 0;
+                    current: root.anchor-h;
+                    chosen(a, k) => { root.anchor-chosen(a, k); }
+                }
+                if root.anchor-v >= 0: AnchorRow {
+                    axis: 1;
+                    current: root.anchor-v;
+                    chosen(a, k) => { root.anchor-chosen(a, k); }
+                }
                 for p in root.props: row := Rectangle {
                     height: p.error == "" ? 44px : 44px + perr.preferred-height + 4px;
                     Text {
@@ -207,7 +271,17 @@ export component BottomPanel inherits Rectangle {
                     }
                     // On touch devices the field is not a text input: tapping it opens the input bar,
                     // whose field gets the first (and only) text focus.
-                    if root.touch-input: Rectangle {
+                    if p.note != "": Text {
+                        x: parent.width * 0.4;
+                        height: 44px;
+                        width: parent.width - self.x - 6px;
+                        text: p.note;
+                        color: #8fc7ff;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    if root.touch-input && p.note == "": Rectangle {
                         x: parent.width * 0.4;
                         y: 2px;
                         width: parent.width - self.x - 6px - (p.can-param ? 80px : 0px);
@@ -229,7 +303,7 @@ export component BottomPanel inherits Rectangle {
                             clicked => { root.value-focused(p.name, p.value, row.absolute-position.y + row.height); }
                         }
                     }
-                    if !root.touch-input: LineEdit {
+                    if !root.touch-input && p.note == "": LineEdit {
                         x: parent.width * 0.4;
                         y: 2px;
                         width: parent.width - self.x - 6px - (p.can-param ? 80px : 0px);
@@ -276,6 +350,7 @@ export component BottomPanel inherits Rectangle {
                         font-size: 12px;
                         wrap: word-wrap;
                     }
+                }
                 }
             }
             if root.tab == 3: VerticalLayout {
@@ -790,6 +865,57 @@ export component ParamDialog inherits ModalCard {
                 enabled: pname.text != "" && root.error == "";
                 clicked => { root.run(pname.text, root.need-type ? root.ty : ""); }
             }
+        }
+    }
+}
+
+// The proposed anchors of the tidied children; OK writes them all as one step.
+export component InferDialog inherits ModalCard {
+    in property <[InferItem]> rows;
+    callback accepted();
+    callback close();
+    VerticalLayout {
+        spacing: 8px;
+        Text {
+            text: "付き方を推定";
+            color: white;
+            font-size: 15px;
+        }
+        Text {
+            text: "入れ物の端との余白から決めた付き方です。OK で見た目を変えずにまとめて書き換えます。";
+            color: #9aa3ad;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        ListView {
+            height: min(root.rows.length * 36px, 216px);
+            for r in root.rows: Rectangle {
+                height: 36px;
+                Text {
+                    x: 4px;
+                    width: parent.width * 0.5;
+                    text: r.label;
+                    color: white;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    x: parent.width * 0.5;
+                    width: parent.width * 0.5 - 4px;
+                    text: (r.h != "" ? "横: " + r.h + "  " : "") + (r.v != "" ? "縦: " + r.v : "");
+                    color: #8fc7ff;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            height: 44px;
+            ToolButton { text: "キャンセル"; clicked => { root.close(); } }
+            ToolButton { text: "OK"; clicked => { root.accepted(); } }
         }
     }
 }
