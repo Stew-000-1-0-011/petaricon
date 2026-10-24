@@ -7,7 +7,7 @@ use app::anchor::{Anchor, Axis, Kind};
 use app::session::{Corner, Session, SessionError};
 use slint_doc::{Document, ElementPath};
 
-const EXPR_MSG: &str = "式で書かれているため動かせません(ソースで直せます)";
+const EXPR_MSG: &str = "式で書かれているため動かせません(付き方を選ぶと動かせます)";
 
 fn path(i: &[usize]) -> ElementPath {
     ElementPath { component: "Main".into(), indices: i.to_vec() }
@@ -233,21 +233,55 @@ fn start_axes_are_written_as_before() {
     assert_eq!(binding(&s, "height"), "40px");
 }
 
-#[test]
-fn an_expression_is_never_overwritten() {
-    let src = source(
+fn expr_x_session() -> Session {
+    session_of(source(
         "            x: box.width / 4;\n            y: 16px;\n            width: 60px;\n            height: 30px;\n",
-    );
-    let mut s = session_of(src);
+    ))
+}
+
+#[test]
+fn an_expression_axis_stays_while_the_other_axis_moves() {
+    let mut s = expr_x_session();
     assert_eq!(s.anchors(), Some((Anchor::Expr, Anchor::Start(16.0))));
+    s.move_selection(8., 8.).unwrap();
+    assert_eq!(binding(&s, "x"), "box.width / 4");
+    assert_eq!(binding(&s, "y"), "24px");
+    let notice = s.take_notice().expect("a notice");
+    assert_eq!(notice, "横 は式で書かれているため動かしません(付き方を選ぶと動かせます)");
+    assert_eq!(s.take_notice(), None);
+    // dragging only along the plain axis says nothing
+    rebuild(&mut s);
+    s.move_selection(0., 8.).unwrap();
+    assert_eq!(s.take_notice(), None);
+    assert_eq!(binding(&s, "y"), "32px");
+    // dragging only along the expression axis changes nothing but still says so
+    rebuild(&mut s);
+    let before = s.doc().text().to_string();
+    s.move_selection(8., 0.).unwrap();
+    assert_eq!(s.doc().text(), before);
+    assert!(s.take_notice().is_some());
+}
+
+#[test]
+fn both_axes_as_expressions_refuse_a_move() {
+    let mut s = session_of(source(
+        "            x: box.width / 4;\n            y: box.height / 4;\n            width: 60px;\n            height: 30px;\n",
+    ));
+    let before = s.doc().text().to_string();
+    match s.move_selection(8., 8.) {
+        Err(e @ SessionError::Anchor(_)) => assert_eq!(e.to_string(), EXPR_MSG),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.doc().text(), before);
+}
+
+#[test]
+fn resizing_an_expression_edge_is_refused_and_a_switch_replaces_it() {
+    let mut s = expr_x_session();
     let before = s.doc().text().to_string();
     for r in [
-        s.move_selection(8., 8.),
-        s.move_selection(8., 0.),
         s.resize_selection(Corner::BottomRight, 8., 8.),
         s.resize_selection(Corner::TopLeft, 0., 8.),
-        s.set_anchor(Axis::H, Kind::Start),
-        s.set_anchor(Axis::H, Kind::End),
         s.set_property("x", "5"),
     ] {
         match r {
@@ -256,14 +290,79 @@ fn an_expression_is_never_overwritten() {
         }
     }
     assert_eq!(s.doc().text(), before);
-    // The other axis still moves, as does a drag along it.
-    s.move_selection(0., 8.).unwrap();
-    assert_eq!(binding(&s, "x"), "box.width / 4");
-    assert_eq!(binding(&s, "y"), "24px");
-    s.set_anchor(Axis::V, Kind::End).unwrap();
-    assert_eq!(binding(&s, "x"), "box.width / 4");
-    // Clearing a binding is the user's own decision.
+    // Choosing an anchor is the way out: the rectangle stays.
+    let rect = local(&s);
+    s.set_anchor(Axis::H, Kind::End).unwrap();
+    rebuild(&mut s);
+    assert_eq!(local(&s), rect);
+    assert_eq!(s.anchors().unwrap().0.kind(), Some(Kind::End));
+    // and clearing a binding stays the user's own decision
+    let mut s = expr_x_session();
     s.set_property("x", "").unwrap();
+}
+
+#[test]
+fn leaving_an_expression_with_an_expression_size_writes_a_length() {
+    let mut s = session_of(source(
+        "            x: 40px;\n            y: 16px;\n            width: parent.width * 0.3;\n            height: 30px;\n",
+    ));
+    assert_eq!(s.anchors().unwrap().0, Anchor::Expr);
+    let rect = local(&s);
+    s.set_anchor(Axis::H, Kind::Center).unwrap();
+    assert_eq!(binding(&s, "width"), "60px");
+    rebuild(&mut s);
+    assert_eq!(local(&s), rect);
+}
+
+#[test]
+fn a_typed_length_next_to_an_expression_is_written_as_always() {
+    let mut s = session_of(source(
+        "            x: box.width / 4;\n            y: 16px;\n            width: 100px;\n            height: 30px;\n",
+    ));
+    s.set_property("width", "120").unwrap();
+    assert_eq!(binding(&s, "width"), "120px");
+    assert_eq!(binding(&s, "x"), "box.width / 4");
+    // but not over the expression itself
+    let mut s = session_of(source(
+        "            x: 40px;\n            y: 16px;\n            width: parent.width * 0.3;\n            height: 30px;\n",
+    ));
+    assert!(matches!(s.set_property("width", "120"), Err(SessionError::Anchor(_))));
+    s.set_property("x", "50").unwrap();
+    assert_eq!(binding(&s, "x"), "50px");
+}
+
+#[test]
+fn centre_numbers_do_not_drift() {
+    // 100 - 31 is odd: the preview puts a centred kid on a half pixel.
+    let src = source(
+        "            x: 40px;\n            y: 16px;\n            width: 60px;\n            height: 31px;\n",
+    );
+    let mut s = session_of(src);
+    s.grid = 1;
+    s.set_anchor(Axis::H, Kind::Center).unwrap();
+    s.set_anchor(Axis::V, Kind::Center).unwrap();
+    rebuild(&mut s);
+    let (h0, v0) = s.anchors().unwrap();
+    let (Anchor::Center(ch), Anchor::Center(cv)) = (h0, v0) else { panic!("{h0:?} {v0:?}") };
+    let x_text = binding(&s, "x");
+    // vertical drags leave the horizontal numbers (and text) alone
+    for i in 1..=3 {
+        s.move_selection(0., 3.).unwrap();
+        rebuild(&mut s);
+        assert_eq!(binding(&s, "x"), x_text);
+        assert_eq!(s.anchors().unwrap().1, Anchor::Center(cv + 3.0 * f64::from(i)));
+    }
+    // horizontal +1 / -1 returns to the same number, however often
+    let y_text = binding(&s, "y");
+    for _ in 0..3 {
+        s.move_selection(1., 0.).unwrap();
+        rebuild(&mut s);
+        assert_eq!(s.anchors().unwrap().0, Anchor::Center(ch + 1.0));
+        s.move_selection(-1., 0.).unwrap();
+        rebuild(&mut s);
+        assert_eq!(s.anchors().unwrap().0, Anchor::Center(ch));
+        assert_eq!(binding(&s, "y"), y_text);
+    }
 }
 
 #[test]
@@ -319,7 +418,7 @@ fn tidy_keeps_the_anchor_and_changes_its_numbers() {
 }
 
 #[test]
-fn tidy_refuses_to_move_an_expression() {
+fn tidy_leaves_an_expression_axis_and_says_so() {
     let body = "        Rectangle { x: 10px; y: 10px; width: 100px; height: 30px; }\n        Rectangle { x: box.width / 25 - 4px; y: 60px; width: 100px; height: 30px; }\n";
     let src = format!(
         "export component Main inherits Rectangle {{\n    width: 300px;\n    height: 300px;\n    box := Rectangle {{\n        x: 0px;\n        y: 0px;\n        width: 300px;\n        height: 300px;\n{body}    }}\n}}\n"
@@ -327,9 +426,11 @@ fn tidy_refuses_to_move_an_expression() {
     let mut s = session_of(src);
     s.select_path(path(&[0]));
     let before = s.doc().text().to_string();
-    // x = 8 is within tolerance of 10, so tidy wants to move the expression
-    assert!(matches!(s.tidy_free_selection(16.0), Err(SessionError::Anchor(_))));
-    assert_eq!(s.doc().text(), before);
+    // x = 8 is within tolerance of 10, so tidy wants to move the expression: it stays
+    let r = s.tidy_free_selection(16.0).unwrap();
+    assert!(r.notice.as_deref().is_some_and(|n| n.contains("Rectangle #2")), "{:?}", r.notice);
+    assert!(s.doc().text().contains("x: box.width / 25 - 4px;"));
+    let _ = before;
 }
 
 #[test]
@@ -347,6 +448,17 @@ fn stacking_and_unstacking_refuse_to_drop_an_anchor() {
 fn unstacking_refuses_a_child_with_an_anchor() {
     let mut s = session_of(
         "export component Main inherits Rectangle {\n    width: 300px;\n    height: 300px;\n    VerticalLayout {\n        Rectangle { x: parent.width - self.width - 5px; height: 30px; }\n    }\n}\n".into(),
+    );
+    s.select_path(path(&[0]));
+    let before = s.doc().text().to_string();
+    assert!(matches!(s.unstack_selection(), Err(SessionError::Anchor(_))));
+    assert_eq!(s.doc().text(), before);
+}
+
+#[test]
+fn unstacking_refuses_to_write_px_over_an_expression() {
+    let mut s = session_of(
+        "export component Main inherits Rectangle {\n    width: 300px;\n    height: 300px;\n    VerticalLayout {\n        Rectangle { x: root.width / 2; height: 30px; }\n    }\n}\n".into(),
     );
     s.select_path(path(&[0]));
     let before = s.doc().text().to_string();

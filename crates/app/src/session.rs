@@ -17,10 +17,17 @@ const MIN_SIZE: f32 = 4.0;
 const TAP_THRESHOLD: f32 = 8.0;
 
 /// Why an axis written as some other expression is not moved, resized or switched.
-pub const EXPR_ANCHOR: &str = "式で書かれているため動かせません(ソースで直せます)";
+pub const EXPR_ANCHOR: &str = "式で書かれているため動かせません(付き方を選ぶと動かせます)";
 /// Why children anchored right / centre / both sides cannot go into or out of a layout.
 const ANCHORED_CHILD: &str =
     "右・下・中央・左右・上下に付いた子要素があるため変えられません(先に左・上に切り替えてください)";
+
+/// The notice when a drag leaves an axis written as an expression where it is.
+fn expr_notice(axes: &[Axis]) -> String {
+    let names: Vec<&str> =
+        axes.iter().map(|a| if *a == Axis::H { "横" } else { "縦" }).collect();
+    format!("{} は式で書かれているため動かしません(付き方を選ぶと動かせます)", names.join("・"))
+}
 
 fn expr_refusal() -> SessionError {
     SessionError::Anchor(EXPR_ANCHOR.into())
@@ -44,6 +51,9 @@ fn span(r: &tidy::Rect, axis: Axis) -> (f32, f32) {
 
 /// A binding to write: the property and its new expression (`None` removes it).
 type Binding = (String, Option<String>);
+
+/// The preview values and the build a text compiled with.
+type Compiled = (Vec<(String, String)>, Built);
 
 /// `(old start, old end, new start, new end)` of an edge pair of a resize.
 type Edges = (f32, f32, f32, f32);
@@ -493,6 +503,8 @@ pub struct TidyReport {
     pub container: ElementPath,
     /// Path of every child, in the order the relations index them.
     pub children: Vec<ElementPath>,
+    /// Children whose axes written as expressions were left alone (for the toast).
+    pub notice: Option<String>,
 }
 
 impl TidyReport {
@@ -537,6 +549,8 @@ pub struct Session {
     /// The compile of the text a property edit just produced; `rebuild` uses it instead of
     /// compiling the same text again.
     prepared: Option<Prepared>,
+    /// What the last move left alone, for the toast (see `take_notice`).
+    notice: Option<String>,
 }
 
 struct Prepared {
@@ -595,7 +609,14 @@ impl Session {
             previews: Default::default(),
             dropped: Vec::new(),
             prepared: None,
+            notice: None,
         }
+    }
+
+    /// A note about the last move or resize (an axis left alone because it is an expression),
+    /// once.
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
     }
 
     /// The stored previews of this file's components (before the first `rebuild`).
@@ -937,7 +958,8 @@ impl Session {
 
     /// Switches the anchor of one axis of the selection to `kind`, keeping the element where
     /// it is on screen (and as large) in the current preview; one history step. Refused in a
-    /// layout and for an axis written as some other expression.
+    /// layout. An axis written as some other expression is replaced: choosing an anchor is the
+    /// way out of it.
     pub fn set_anchor(&mut self, axis: Axis, kind: Kind) -> Result<(), SessionError> {
         let (path, hit, in_layout) = self.movable()?;
         if in_layout {
@@ -948,17 +970,22 @@ impl Session {
             .element(&path)
             .ok_or_else(|| EditError::ElementNotFound(path.clone()))?;
         let current = anchor_of(&info, axis);
-        if current == Anchor::Expr {
-            return Err(expr_refusal());
-        }
         if current.kind() == Some(kind) {
             return Ok(());
         }
         let (pos, size) = span(&hit.local, axis);
         let parent = self.need_parent_length(&path, axis)?;
         let anchor = anchor::solve(kind, f64::from(pos), f64::from(size), parent);
-        // Leaving `Stretch` the size was an expression: it becomes the length it has now.
-        let size_px = matches!(current, Anchor::Stretch(..)).then_some(size);
+        // Leaving `Stretch`, or an expression, the size that was an expression becomes the
+        // length it has now.
+        let written_size = info
+            .bindings
+            .iter()
+            .find(|b| b.name == axis.size())
+            .map(|b| b.expr.trim())
+            .unwrap_or_default();
+        let odd_size = !written_size.is_empty() && anchor::plain_length(written_size).is_none();
+        let size_px = (matches!(current, Anchor::Stretch(..)) || odd_size).then_some(size);
         let bindings = anchor_bindings(axis, anchor, size_px);
         self.apply_validated(Op::SetBindings { path, bindings })
     }
@@ -987,33 +1014,51 @@ impl Session {
         })
     }
 
-    /// A move with at least one axis not anchored at the start: each axis keeps its anchor and
-    /// only its numbers change.
+    /// A move with at least one axis not anchored at the start: only axes that were dragged
+    /// are written, each keeping its anchor with its stored numbers moved by the (grid-snapped)
+    /// delta. An axis written as an expression stays and gets a notice (`take_notice`).
     fn move_anchored(
         &mut self,
         path: ElementPath,
         hit: &Hit,
         axes: &[(Axis, Anchor, f32); 2],
     ) -> Result<(), SessionError> {
-        if axes.iter().any(|&(_, a, d)| a == Anchor::Expr && d != 0.0) {
+        self.notice = None;
+        if axes.iter().all(|&(_, a, _)| a == Anchor::Expr) {
             return Err(expr_refusal());
         }
-        let mut bindings = Vec::new();
+        let (mut bindings, mut skipped) = (Vec::new(), Vec::new());
         for &(axis, anchor, d) in axes {
-            let (pos, size) = span(&hit.local, axis);
-            let new = snap(pos + d, self.grid);
+            if d == 0.0 {
+                continue;
+            }
             match anchor {
-                Anchor::Expr => {}
-                Anchor::Start(_) => bindings.push((axis.pos().to_string(), Some(format!("{new}px")))),
+                Anchor::Expr => skipped.push(axis),
+                Anchor::Start(_) => {
+                    let new = snap(span(&hit.local, axis).0 + d, self.grid);
+                    bindings.push((axis.pos().to_string(), Some(format!("{new}px"))));
+                }
                 other => {
-                    let parent = self.need_parent_length(&path, axis)?;
-                    let kind = other.kind().expect("not an expression");
-                    let solved = anchor::solve(kind, f64::from(new), f64::from(size), parent);
-                    bindings.extend(anchor_bindings(axis, solved, None));
+                    let delta = f64::from(snap(d, self.grid));
+                    let moved = match other {
+                        Anchor::End(b) => Anchor::End(b - delta),
+                        Anchor::Center(c) => Anchor::Center(c + delta),
+                        Anchor::Stretch(a, b) => Anchor::Stretch(a + delta, b - delta),
+                        _ => continue,
+                    };
+                    if delta != 0.0 {
+                        bindings.extend(anchor_bindings(axis, moved, None));
+                    }
                 }
             }
         }
-        self.apply(Op::SetBindings { path, bindings })
+        if !skipped.is_empty() {
+            self.notice = Some(expr_notice(&skipped));
+        }
+        if bindings.is_empty() {
+            return Ok(());
+        }
+        self.apply_validated(Op::SetBindings { path, bindings })
     }
 
     pub fn resize_selection(
@@ -1050,6 +1095,7 @@ impl Session {
         let axes = [(Axis::H, (left, right, l, rt)), (Axis::V, (top, bottom, t, b))]
             .map(|(a, edges)| (a, anchor_of(&info, a), edges));
         if !in_layout && !axes.iter().all(|&(_, a, _)| is_start(a)) {
+            self.notice = None;
             return self.resize_anchored(path, &axes);
         }
         let mut bindings = Vec::new();
@@ -1100,7 +1146,7 @@ impl Session {
             }
         }
         positions.extend(sizes);
-        self.apply(Op::SetBindings { path, bindings: positions })
+        self.apply_validated(Op::SetBindings { path, bindings: positions })
     }
 
     /// Applies an edit. While the preview is stale (`diagnostics` non-empty) structural ops
@@ -1356,7 +1402,18 @@ impl Session {
             .element(path)
             .ok_or_else(|| EditError::ElementNotFound(path.clone()))?;
         let anchor = anchor_of(&info, axis);
-        let Some(kind) = anchor.kind() else { return Err(expr_refusal()) };
+        let Some(kind) = anchor.kind() else {
+            // Only the property that holds the expression (and would be overwritten) is
+            // refused; a plain length next to an expression is written as always.
+            let written = info
+                .bindings
+                .iter()
+                .find(|b| b.name == name)
+                .map(|b| b.expr.trim())
+                .unwrap_or_default();
+            let overwrites = !written.is_empty() && anchor::plain_length(written).is_none();
+            return if overwrites { Err(expr_refusal()) } else { Ok(None) };
+        };
         if kind == Kind::Start {
             return Ok(None);
         }
@@ -1384,29 +1441,43 @@ impl Session {
     /// compile. A compile that succeeded is kept for the next `rebuild`.
     fn apply_validated(&mut self, op: Op) -> Result<(), SessionError> {
         let new_text = self.doc.preview_apply(op.clone())?;
-        self.refuse_new_syntax_errors(&new_text)?;
-        let mut built = None;
+        let built = self.check_text(&new_text)?;
+        self.apply(op)?;
+        debug_assert_eq!(self.doc.text(), new_text);
+        self.keep_compile(new_text, built);
+        Ok(())
+    }
+
+    /// Refuses `new_text` (nothing changed) when it adds a syntax error or, while the document
+    /// compiles, stops compiling. The compile that succeeded is returned for `keep_compile`.
+    fn check_text(
+        &self,
+        new_text: &str,
+    ) -> Result<Option<Compiled>, SessionError> {
+        self.refuse_new_syntax_errors(new_text)?;
         // A document that already does not compile is not made worse by one more binding;
         // the user may be on the way to fixing it.
-        if self.diagnostics.is_empty() {
-            let values = self.effective_values();
-            match compile_with(&new_text, self.doc.path(), &self.component, &values) {
-                Ok(b) => built = Some((values, b)),
-                Err(d) => return Err(SessionError::Rejected(short(&first_message(&d)))),
-            }
+        if !self.diagnostics.is_empty() {
+            return Ok(None);
         }
-        self.apply(op)?;
+        let values = self.effective_values();
+        match compile_with(new_text, self.doc.path(), &self.component, &values) {
+            Ok(b) => Ok(Some((values, b))),
+            Err(d) => Err(SessionError::Rejected(short(&first_message(&d)))),
+        }
+    }
+
+    /// Keeps the compile of `text` (now the document's text) for the next `rebuild`.
+    fn keep_compile(&mut self, text: String, built: Option<Compiled>) {
         if let Some((values, b)) = built {
-            debug_assert_eq!(self.doc.text(), new_text);
             self.prepared = Some(Prepared {
-                text: new_text,
+                text,
                 path: self.doc.path().to_path_buf(),
                 component: self.component.clone(),
                 values,
                 built: b,
             });
         }
-        Ok(())
     }
 
     /// The type a parameter made from `property` gets, from the name alone.
@@ -1794,20 +1865,29 @@ impl Session {
     }
 
     /// Wrapping into a layout drops the children's `x` / `y`, and unwrapping writes them
-    /// again, so an anchor other than left / top would be lost: refused.
+    /// again, so an anchor other than left / top would be lost: refused. Unwrapping also
+    /// refuses an `x` / `y` expression it would overwrite; wrapping drops those as ever.
     fn refuse_anchored_children(
         &self,
         parent: &ElementPath,
         count: usize,
+        unwrap: bool,
     ) -> Result<(), SessionError> {
         let anchored = (0..count).any(|i| {
             self.doc.element(&Self::child_path(parent, i)).is_some_and(|c| {
-                [Axis::H, Axis::V].iter().any(|&a| {
-                    matches!(
-                        anchor_of(&c, a),
-                        Anchor::End(_) | Anchor::Center(_) | Anchor::Stretch(..)
-                    )
-                })
+                // Unwrapping writes `x` / `y` as px over whatever is there.
+                let overwritten = unwrap
+                    && c.bindings.iter().any(|b| {
+                        matches!(b.name.as_str(), "x" | "y")
+                            && anchor::plain_length(b.expr.trim()).is_none()
+                    });
+                overwritten
+                    || [Axis::H, Axis::V].iter().any(|&a| {
+                        matches!(
+                            anchor_of(&c, a),
+                            Anchor::End(_) | Anchor::Center(_) | Anchor::Stretch(..)
+                        )
+                    })
             })
         });
         if anchored { Err(SessionError::Anchor(ANCHORED_CHILD.into())) } else { Ok(()) }
@@ -1834,7 +1914,7 @@ impl Session {
                 .into());
             }
         }
-        self.refuse_anchored_children(&path, info.child_count)?;
+        self.refuse_anchored_children(&path, info.child_count, false)?;
         let container = self.hit_of(&path).ok_or(SessionError::NoGeometry)?;
         let children = (0..info.child_count)
             .map(|i| self.hit_of(&Self::child_path(&path, i)).map(|h| h.local))
@@ -1901,6 +1981,8 @@ impl Session {
         let near = |a: f32, b: f32| (a - b).abs() < 0.01;
         let mut scratch = self.snapshot_doc();
         let mut changed = 0;
+        let mut skipped: Vec<ElementPath> = Vec::new();
+        let mut anchored_write = false;
         for ((ci, old), new) in infos.iter().zip(&children).zip(&out.rects) {
             let mut bindings = Vec::new();
             let current = |n: &str| ci.bindings.iter().find(|b| b.name == n).map(|b| b.expr.trim());
@@ -1939,7 +2021,7 @@ impl Session {
                         }
                     };
                     match anchor {
-                        Anchor::Expr => return Err(expr_refusal()),
+                        Anchor::Expr => skipped.push(ci.path.clone()),
                         Anchor::Start(_) => {
                             if !near(old_pos, new_pos) {
                                 push(&mut positions, axis.pos(), format!("{}px", new_pos.round() as i32));
@@ -1973,6 +2055,7 @@ impl Session {
                 }
                 bindings = positions;
                 bindings.extend(sizes);
+                anchored_write |= !bindings.is_empty();
             }
             if bindings.is_empty() {
                 continue;
@@ -1981,9 +2064,25 @@ impl Session {
             scratch.apply(Op::SetBindings { path: ci.path.clone(), bindings })?;
         }
         if changed > 0 {
-            self.doc.replace_text(scratch.text().to_string());
+            let text = scratch.text().to_string();
+            // Anchored writes are checked like any property edit.
+            let built = if anchored_write { self.check_text(&text)? } else { None };
+            self.doc.replace_text(text.clone());
+            self.keep_compile(text, built);
         }
+        skipped.dedup();
+        let notice = (!skipped.is_empty()).then(|| {
+            let names: Vec<String> = skipped
+                .iter()
+                .map(|p| {
+                    let ty = self.doc.element(p).map(|i| i.type_name).unwrap_or_default();
+                    format!("{ty} #{}", p.indices.last().map_or(0, |i| i + 1))
+                })
+                .collect();
+            format!("式で書かれた軸は動かしませんでした: {}", names.join("、"))
+        });
         Ok(TidyReport {
+            notice,
             relations: out.relations,
             changed,
             container: path,
@@ -2047,7 +2146,7 @@ impl Session {
         let (layout, layout_info, _) = self.guide_layout().ok_or(SessionError::NotALayout)?;
         let mut parent = layout.clone();
         parent.indices.pop();
-        self.refuse_anchored_children(&layout, layout_info.child_count)?;
+        self.refuse_anchored_children(&layout, layout_info.child_count, true)?;
         let origin = self.hit_of(&parent).ok_or(SessionError::NoGeometry)?.rect;
         let positions = (0..layout_info.child_count)
             .map(|i| {

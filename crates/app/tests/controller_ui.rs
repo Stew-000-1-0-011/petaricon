@@ -152,7 +152,7 @@ fn changed_lines(before: &str, after: &str) -> Vec<(String, String)> {
 }
 
 #[test]
-fn moving_a_free_placed_element_changes_only_its_x_and_y() {
+fn moving_a_free_placed_element_changes_only_its_plain_axes() {
     let mut s = session_for("auto.slint", "AutoPanel");
     let tree = s.doc().tree("AutoPanel").unwrap();
     let target = find(&tree, None, &|n, pk| {
@@ -163,32 +163,31 @@ fn moving_a_free_placed_element_changes_only_its_x_and_y() {
     })
     .expect("a free-placed Panel with x and y");
     s.select_path(target.info.path.clone());
-    // The fixture positions its panels by expressions, which a drag never overwrites (see
-    // the next test); this one is about a plain `px` position, so give the panel one.
+    // The fixture positions its panels by expressions (both axes here): a drag leaves them
+    // alone and is refused.
     let before = s.doc().text().to_string();
     let r = s.move_selection(16., 8.);
     assert!(matches!(r, Err(SessionError::Anchor(_))), "{r:?}");
     assert_eq!(s.doc().text(), before);
+    // With a plain `px` x only that axis moves and the expression on y stays.
     s.apply(Op::SetBindings {
         path: target.info.path.clone(),
-        bindings: vec![("x".into(), Some("40px".into())), ("y".into(), Some("40px".into()))],
+        bindings: vec![("x".into(), Some("40px".into()))],
     })
     .unwrap();
     assert!(s.rebuild_standalone(480., 360.), "{:?}", s.diagnostics());
     let before = s.doc().text().to_string();
     s.move_selection(16., 8.).expect("move");
+    assert!(s.take_notice().is_some());
     let after = s.doc().text().to_string();
     assert_ne!(before, after);
     let diff = changed_lines(&before, &after);
-    assert_eq!(diff.len(), 2, "{diff:?}");
+    assert_eq!(diff.len(), 1, "{diff:?}");
     assert!(
         diff[0].0.trim_start().starts_with("x:") && diff[0].1.trim_start().starts_with("x:"),
         "{diff:?}"
     );
-    assert!(
-        diff[1].0.trim_start().starts_with("y:") && diff[1].1.trim_start().starts_with("y:"),
-        "{diff:?}"
-    );
+    assert!(after.contains("y: root.top-y"), "the expression on y stays");
 }
 
 #[test]
