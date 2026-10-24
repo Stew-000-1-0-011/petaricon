@@ -369,8 +369,7 @@ impl Glue {
     fn clear_feedback(&self) {
         let ed = self.editor();
         ed.set_message("".into());
-        let diag = self.session.diagnostics().first().map(|d| d.message.clone());
-        ed.set_error_text(diag.unwrap_or_default().into());
+        ed.set_error_text(self.session.diagnostic_banner().into());
     }
 
     fn sync_status(&self) {
@@ -414,11 +413,25 @@ impl Glue {
             .session
             .properties()
             .into_iter()
-            .map(|r| PropItem { name: r.name.into(), value: r.expr.into() })
+            .map(|r| PropItem { name: r.name.into(), value: r.shown.into(), error: "".into() })
             .collect();
         let ed = self.editor();
         ed.set_props(ModelRc::new(VecModel::from(rows)));
         ed.set_props_rev(ed.get_props_rev().wrapping_add(1));
+    }
+
+    /// Shows `text` under the Props row `name` (empty clears it) without touching its value.
+    fn set_prop_error(&self, name: &str, text: &str) {
+        let model = self.editor().get_props();
+        for i in 0..model.row_count() {
+            if let Some(mut row) = model.row_data(i)
+                && row.name == name
+                && row.error != text
+            {
+                row.error = text.into();
+                model.set_row_data(i, row);
+            }
+        }
     }
 
     /// Shows the preview values and the screen size of the current component. With
@@ -722,8 +735,7 @@ impl Glue {
                 ed.set_factory(f);
             }
             None => {
-                let first = self.session.diagnostics().first().map(|d| d.message.clone());
-                ed.set_error_text(first.unwrap_or_default().into());
+                ed.set_error_text(self.session.diagnostic_banner().into());
             }
         }
         self.update_overlay();
@@ -1011,7 +1023,16 @@ impl Glue {
         }
         self.clear_feedback();
         match self.session.set_property(&p.name, &p.value) {
-            Ok(()) => self.rebuild_with(refresh_props, true),
+            Ok(()) => {
+                self.set_prop_error(&p.name, "");
+                self.rebuild_with(refresh_props, true);
+            }
+            Err(e @ crate::session::SessionError::Rejected(_)) => {
+                // The field keeps what was typed; the reason is shown at the field (and in the
+                // band, which is visible above the keyboard).
+                self.set_prop_error(&p.name, &e.to_string());
+                self.set_error(&e.to_string());
+            }
             Err(e) => self.set_error(&e.to_string()),
         }
     }

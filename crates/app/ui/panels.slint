@@ -10,6 +10,8 @@ export struct TreeRowItem {
 export struct PropItem {
     name: string,
     value: string,
+    // Why the last typed value was not applied; empty when it was (or nothing was typed).
+    error: string,
 }
 
 export struct PreviewItem {
@@ -185,9 +187,10 @@ export component BottomPanel inherits Rectangle {
             }
             if root.tab == 2: ListView {
                 for p in root.props: row := Rectangle {
-                    height: 44px;
+                    height: p.error == "" ? 44px : 44px + perr.preferred-height + 4px;
                     Text {
                         x: 8px;
+                        height: 44px;
                         width: 38%;
                         text: p.name;
                         color: p.value == "" ? #8a9199 : white;
@@ -234,6 +237,16 @@ export component BottomPanel inherits Rectangle {
                         }
                         edited(t) => { root.prop-edited(p.name, t); }
                         accepted(t) => { root.prop-accepted(p.name, t); }
+                    }
+                    perr := Text {
+                        x: 8px;
+                        y: 44px;
+                        width: parent.width - 16px;
+                        visible: p.error != "";
+                        text: p.error;
+                        color: #e57373;
+                        font-size: 12px;
+                        wrap: word-wrap;
                     }
                 }
             }

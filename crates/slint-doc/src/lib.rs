@@ -231,6 +231,18 @@ impl Document {
         self.path = path;
     }
 
+    /// The syntax errors of the current text (empty when it parses cleanly).
+    pub fn syntax_errors(&self) -> Vec<String> {
+        syntax::syntax_errors(&self.text, &self.path)
+    }
+
+    /// What `op` would turn the text into, without touching this document or its history.
+    pub fn preview_apply(&self, op: Op) -> Result<String, EditError> {
+        let mut scratch = Document::new(self.path.clone(), self.text.clone());
+        scratch.apply(op)?;
+        Ok(scratch.text)
+    }
+
     fn parse(&self) -> SyntaxNode {
         syntax::parse(&self.text, &self.path)
     }
@@ -380,4 +392,20 @@ fn find(element: &SyntaxNode, offset: u32) -> Option<Vec<usize>> {
         }
     }
     None
+}
+
+/// The syntax errors in `new` that `old` does not already have (compared as a multiset of
+/// messages), i.e. what an edit from `old` to `new` broke.
+pub fn new_syntax_errors(old: &str, new: &str, path: &Path) -> Vec<String> {
+    let mut before = syntax::syntax_errors(old, path);
+    let mut out = Vec::new();
+    for e in syntax::syntax_errors(new, path) {
+        match before.iter().position(|b| *b == e) {
+            Some(i) => {
+                before.swap_remove(i);
+            }
+            None => out.push(e),
+        }
+    }
+    out
 }

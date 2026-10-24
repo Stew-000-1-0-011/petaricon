@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use app::session::{Corner, PropKind, Session, SessionError};
+use app::session::{Corner, PropKind, Session, SessionError, TreeAction};
 use slint_doc::{Document, ElementPath};
 
 const SRC: &str = r#"export component Main inherits Rectangle {
@@ -129,7 +129,12 @@ fn structural_op_while_stale_is_refused() {
     ));
     assert!(!s.rebuild_standalone(300., 300.));
     let before = s.doc().text().to_string();
-    let r = s.apply(slint_doc::Op::RemoveElement { path: path(&[0]) });
+    // Deleting stays possible (see `delete_works_when_...`); every other structural edit is not.
+    let r = s.apply(slint_doc::Op::MoveElement {
+        path: path(&[0, 0]),
+        new_parent: path(&[]),
+        index: None,
+    });
     assert!(matches!(r, Err(SessionError::Compile(_))));
     assert_eq!(s.doc().text(), before);
 }
@@ -514,6 +519,7 @@ fn properties_put_geometry_first() {
     let rows = s.properties();
     assert_eq!(&rows[4].name, "text");
     assert_eq!(rows[4].expr, "\"in\"");
+    assert_eq!(rows[4].shown, "in", "a plain literal is shown without its quotes");
 }
 
 #[test]
@@ -536,7 +542,7 @@ fn set_text_quotes() {
     assert!(s.doc().text().contains("text: \"停止\";"));
     s.set_property("text", "a\"b\\c").unwrap();
     assert!(s.doc().text().contains(r#"text: "a\"b\\c";"#));
-    s.set_property("text", "\"done\"").unwrap();
+    s.set_property("text", "=\"done\"").unwrap();
     assert!(s.doc().text().contains("text: \"done\";"));
     s.set_property("color", "#ff0000").unwrap();
     assert!(s.doc().text().contains("color: #ff0000;"));
@@ -604,7 +610,7 @@ fn text_keeps_surrounding_spaces_and_same_value_is_a_noop() {
     assert!(s.doc().text().contains("text: \"Hi \";"));
     s.mark_saved();
     s.set_property("text", "Hi ").unwrap();
-    s.set_property("text", "\"Hi \"").unwrap();
+    s.set_property("text", "=\"Hi \"").unwrap();
     assert!(!s.doc().is_dirty());
     select(&mut s, &[0]);
     s.set_property("x", "10").unwrap();
@@ -895,4 +901,200 @@ fn comment_mentioning_std_widgets_is_not_an_import() {
         without_new_element(&out),
         format!("import {{ Button }} from \"std-widgets.slint\";\n{src}")
     );
+}
+
+// ---- property edits never leave the document broken ----
+
+const LABELLED: &str = r#"export component Main inherits Rectangle {
+    in property <string> label: "x";
+    width: 300px;
+    height: 300px;
+    Text { x: 0px; y: 0px; text: "Hello"; }
+    Text { x: 0px; y: 40px; text: root.label; }
+    Text { x: 0px; y: 80px; text: "=eq"; }
+    Rectangle { x: 0px; y: 120px; width: 20px; height: 20px; }
+}
+"#;
+
+fn labelled() -> Session {
+    i_slint_backend_testing::init_no_event_loop();
+    let mut s = Session::new(Document::new(PathBuf::from("/t/l.slint"), LABELLED.into()));
+    assert!(s.rebuild_standalone(300., 300.), "{:?}", s.diagnostics());
+    s
+}
+
+fn shown(s: &Session, name: &str) -> String {
+    s.properties().into_iter().find(|r| r.name == name).unwrap().shown
+}
+
+#[test]
+fn quote_then_letters_in_an_expression_is_refused_and_changes_nothing() {
+    let mut s = labelled();
+    s.select_path(path(&[0]));
+    assert_eq!(shown(&s, "text"), "Hello");
+    let before = s.doc().text().to_string();
+    let e = s.set_property("text", "=\"Hello\"abc").unwrap_err();
+    assert!(matches!(e, SessionError::Rejected(_)), "{e:?}");
+    assert!(e.to_string().starts_with("この値は使えません: "), "{e}");
+    assert_eq!(s.doc().text(), before);
+    assert!(!s.doc().is_dirty(), "no history step");
+    // An unbalanced quote on the way to a valid value is refused the same way.
+    assert!(matches!(s.set_property("text", "=\"Hel"), Err(SessionError::Rejected(_))));
+    assert_eq!(s.doc().text(), before);
+    // ... and the same keystrokes in a plain field are just text.
+    s.set_property("text", "\"Hello\"abc").unwrap();
+    assert!(s.doc().text().contains(r#"text: "\"Hello\"abc";"#), "{}", s.doc().text());
+    assert!(s.rebuild_standalone(300., 300.));
+}
+
+#[test]
+fn plain_text_with_quotes_and_backslashes_round_trips() {
+    let mut s = labelled();
+    s.select_path(path(&[0]));
+    for typed in ["say \"hi\"", "C:\\dir\\", "a\\\"b", "\\{x}", "{ok}", " spaced ", "日本語", "=", "a=b"] {
+        if typed == "=" {
+            // A lone `=` asks for an expression and has none.
+            assert!(matches!(s.set_property("text", typed), Err(SessionError::Rejected(_))));
+            continue;
+        }
+        s.set_property("text", typed).unwrap();
+        assert_eq!(shown(&s, "text"), typed, "{}", s.doc().text());
+        assert!(s.rebuild_standalone(300., 300.), "{typed}: {:?}", s.diagnostics());
+        assert!(s.visible_texts().iter().any(|t| t == typed), "{typed}: {:?}", s.visible_texts());
+    }
+    // Typing the shown text back changes nothing.
+    s.mark_saved();
+    s.set_property("text", &shown(&s, "text")).unwrap();
+    assert!(!s.doc().is_dirty());
+}
+
+#[test]
+fn a_literal_that_starts_with_equals_survives_the_expression_rule() {
+    let mut s = labelled();
+    s.select_path(path(&[2]));
+    assert_eq!(shown(&s, "text"), "==eq", "doubled so it is not read as an expression");
+    s.mark_saved();
+    s.set_property("text", "==eq").unwrap();
+    assert!(!s.doc().is_dirty());
+    s.set_property("text", "==new").unwrap();
+    assert!(s.doc().text().contains("text: \"=new\";"));
+}
+
+#[test]
+fn an_expression_binding_stays_raw() {
+    let mut s = labelled();
+    s.select_path(path(&[1]));
+    assert_eq!(shown(&s, "text"), "=root.label");
+    s.mark_saved();
+    s.set_property("text", "=root.label").unwrap();
+    assert!(!s.doc().is_dirty(), "unchanged values are not rewritten");
+    s.set_property("text", "=root.label + \"!\"").unwrap();
+    assert!(s.doc().text().contains("text: root.label + \"!\";"), "{}", s.doc().text());
+    assert_eq!(shown(&s, "text"), "=root.label + \"!\"");
+    assert!(s.rebuild_standalone(300., 300.));
+    // An unknown name does not compile.
+    let before = s.doc().text().to_string();
+    assert!(matches!(s.set_property("text", "=nothing"), Err(SessionError::Rejected(_))));
+    assert_eq!(s.doc().text(), before);
+    // Back to a literal by dropping the `=`.
+    s.set_property("text", "plain").unwrap();
+    assert!(s.doc().text().contains("text: \"plain\";"));
+}
+
+#[test]
+fn a_value_that_does_not_compile_is_refused() {
+    let mut s = labelled();
+    s.select_path(path(&[3]));
+    let before = s.doc().text().to_string();
+    let e = s.set_property("width", "\"abc\"").unwrap_err();
+    assert!(matches!(e, SessionError::Rejected(_)), "{e:?}");
+    assert_eq!(s.doc().text(), before);
+    assert!(!s.doc().is_dirty());
+    assert!(s.diagnostics().is_empty(), "the preview is untouched");
+    assert!(matches!(s.set_property("nonsense", "1"), Err(SessionError::Rejected(_))));
+    assert_eq!(s.doc().text(), before);
+    // A fine value still goes through.
+    s.set_property("width", "30").unwrap();
+    assert!(s.doc().text().contains("width: 30px;"));
+}
+
+#[test]
+fn an_accepted_edit_is_compiled_once() {
+    let mut s = labelled();
+    s.select_path(path(&[3]));
+    let n0 = preview::compile_count();
+    s.set_property("width", "40").unwrap();
+    let n1 = preview::compile_count();
+    assert_eq!(n1 - n0, 1, "validation compiles the new text once");
+    assert!(s.rebuild_standalone(300., 300.));
+    assert_eq!(preview::compile_count(), n1, "the rebuild reuses that compile");
+    // The reuse is only for exactly that text.
+    s.replace_text(s.doc().text().replace("width: 40px", "width: 41px"));
+    assert!(s.rebuild_standalone(300., 300.));
+    assert_eq!(preview::compile_count(), n1 + 1);
+}
+
+#[test]
+fn undo_and_redo_work_while_there_are_diagnostics() {
+    let mut s = labelled();
+    let good = s.doc().text().to_string();
+    for broken in [
+        good.replacen("\"Hello\"", "\"Hello\"abc", 1),
+        good.replacen("20px", "\"abc\"", 1),
+    ] {
+        s.replace_text(broken.clone());
+        assert!(!s.rebuild_standalone(300., 300.));
+        assert!(!s.diagnostics().is_empty());
+        assert!(s.diagnostic_banner().ends_with("(元に戻す か ソース で直せます)"), "{}", s.diagnostic_banner());
+        assert!(s.undo());
+        assert_eq!(s.doc().text(), good);
+        assert!(s.rebuild_standalone(300., 300.));
+        assert!(s.diagnostic_banner().is_empty());
+        assert!(s.redo());
+        assert_eq!(s.doc().text(), broken);
+        assert!(!s.rebuild_standalone(300., 300.));
+        assert!(s.undo());
+    }
+}
+
+#[test]
+fn delete_works_when_the_document_parses_but_does_not_compile() {
+    let mut s = labelled();
+    let broken = LABELLED.replacen("width: 20px;", "width: \"abc\";", 1);
+    s.replace_text(broken);
+    assert!(s.doc().syntax_errors().is_empty());
+    assert!(!s.rebuild_standalone(300., 300.));
+    // The tree still lists the elements and lets them be selected.
+    assert_eq!(s.tree_rows().len(), 5);
+    s.select_path(path(&[3]));
+    assert_eq!(s.selection(), Some(&path(&[3])));
+    // Other structural edits stay refused, deleting does not.
+    assert!(matches!(s.tree_action(&path(&[3]), TreeAction::Up), Err(SessionError::Compile(_))));
+    s.tree_action(&path(&[3]), TreeAction::Delete).unwrap();
+    assert!(!s.doc().text().contains("width: \"abc\""));
+    assert_eq!(s.tree_rows().len(), 4);
+    assert!(s.rebuild_standalone(300., 300.), "{:?}", s.diagnostics());
+}
+
+#[test]
+fn delete_works_for_the_element_whose_text_does_not_parse() {
+    let mut s = labelled();
+    s.replace_text(LABELLED.replacen("text: \"Hello\";", "text: \"Hello\"abc;", 1));
+    assert!(!s.doc().syntax_errors().is_empty());
+    assert!(!s.rebuild_standalone(300., 300.));
+    assert_eq!(s.tree_rows().len(), 5, "the tree still shows the broken element");
+    s.tree_action(&path(&[0]), TreeAction::Delete).unwrap();
+    assert!(s.doc().syntax_errors().is_empty(), "{}", s.doc().text());
+    assert!(s.rebuild_standalone(300., 300.), "{:?}", s.diagnostics());
+}
+
+#[test]
+fn a_broken_document_can_still_have_a_property_fixed() {
+    let mut s = labelled();
+    s.replace_text(LABELLED.replacen("width: 20px;", "width: \"abc\";", 1));
+    assert!(!s.rebuild_standalone(300., 300.));
+    s.select_path(path(&[3]));
+    // The broken property itself can be set again (the preview can only catch up on rebuild).
+    s.set_property("width", "20").unwrap();
+    assert!(s.rebuild_standalone(300., 300.), "{:?}", s.diagnostics());
 }

@@ -10,6 +10,17 @@ pub(crate) fn parse(text: &str, path: &Path) -> SyntaxNode {
     i_slint_compiler::parser::parse(text.to_string(), Some(path), &mut diag)
 }
 
+/// The syntax errors (not compile errors) the parser reports for `text`, as messages.
+pub(crate) fn syntax_errors(text: &str, path: &Path) -> Vec<String> {
+    use i_slint_compiler::diagnostics::DiagnosticLevel;
+    let mut diag = BuildDiagnostics::default();
+    i_slint_compiler::parser::parse(text.to_string(), Some(path), &mut diag);
+    diag.iter()
+        .filter(|d| d.level() == DiagnosticLevel::Error)
+        .map(|d| d.message().to_string())
+        .collect()
+}
+
 pub(crate) fn component_name(component: &SyntaxNode) -> String {
     component
         .child_node(SyntaxKind::DeclaredIdentifier)

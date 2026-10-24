@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use preview::{Diagnostic, Hit, LiveInstance, compile_with};
+use preview::{Built, Diagnostic, Hit, LiveInstance, compile_with};
 use storage::ComponentPreview;
 use slint_doc::{
     Document, EditError, ElementInfo, ElementKind, ElementPath, LayoutKind, Op, TreeNode,
@@ -39,6 +39,9 @@ pub enum SessionError {
     NoGeometry,
     #[error("コンパイルに失敗しました")]
     Compile(Vec<Diagnostic>),
+    /// An edit that would leave the document broken; nothing was changed.
+    #[error("この値は使えません: {0}")]
+    Rejected(String),
     #[error("表示後にソースが変わりました。ソースタブを開き直してください")]
     StaleSource,
 }
@@ -65,7 +68,10 @@ pub enum PropKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropRow {
     pub name: String,
+    /// The binding as written in the source; empty when the property is not set.
     pub expr: String,
+    /// What the field shows (see `field_text`).
+    pub shown: String,
     pub kind: PropKind,
 }
 
@@ -109,14 +115,41 @@ fn is_bare_number(v: &str) -> bool {
         && dots <= 1
 }
 
-fn normalise(kind: PropKind, value: &str) -> String {
-    match kind {
-        PropKind::Length if is_bare_number(value) => format!("{value}px"),
-        PropKind::Text if !value.starts_with('"') => {
-            format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-        }
-        _ => value.to_string(),
+/// A string literal for `text`: `\` and `"` escaped.
+fn string_literal(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// What a property field shows for the binding `expr`. For `text`, a plain string literal is
+/// shown as the string itself (no quotes, no escapes; a leading `=` is doubled); any other
+/// binding is shown as `=` and the expression. Other properties show the expression.
+pub fn field_text(kind: PropKind, expr: &str) -> String {
+    if kind != PropKind::Text || expr.is_empty() {
+        return expr.to_string();
     }
+    match unquote(expr) {
+        Some(s) if s.starts_with('=') => format!("={s}"),
+        Some(s) => s,
+        None => format!("={expr}"),
+    }
+}
+
+/// The binding expression a field value stands for. For `text`: `=expr` is the expression
+/// `expr`, `==abc` is the text `=abc`, anything else is a plain string that is quoted and
+/// escaped here, so nothing typed can end the literal. `Err` is a reason to show.
+fn normalise(kind: PropKind, value: &str) -> Result<String, String> {
+    Ok(match kind {
+        PropKind::Length if is_bare_number(value) => format!("{value}px"),
+        PropKind::Text => match value.strip_prefix('=') {
+            Some(rest) if rest.starts_with('=') => string_literal(rest),
+            Some(rest) if rest.trim().is_empty() => {
+                return Err("= のあとに式を書いてください".into());
+            }
+            Some(rest) => rest.trim().to_string(),
+            None => string_literal(value),
+        },
+        _ => value.to_string(),
+    })
 }
 
 /// How a preview value is entered.
@@ -384,7 +417,35 @@ pub struct Session {
     previews: std::collections::BTreeMap<String, ComponentPreview>,
     /// `(property, reason)` of the values the last successful build left out.
     dropped: Vec<(String, String)>,
+    /// The compile of the text a property edit just produced; `rebuild` uses it instead of
+    /// compiling the same text again.
+    prepared: Option<Prepared>,
 }
+
+struct Prepared {
+    text: String,
+    path: std::path::PathBuf,
+    component: String,
+    values: Vec<(String, String)>,
+    built: Built,
+}
+
+fn first_message(d: &[Diagnostic]) -> String {
+    d.first().map(|d| d.message.clone()).unwrap_or_default()
+}
+
+/// A diagnostic cut to a length that fits next to a field.
+fn short(message: &str) -> String {
+    let line = message.lines().next().unwrap_or_default();
+    if line.chars().count() > 60 {
+        format!("{}…", line.chars().take(60).collect::<String>())
+    } else {
+        line.to_string()
+    }
+}
+
+/// Tail of the error band while the document does not compile: the ways out.
+pub const DIAGNOSTIC_HINT: &str = "(元に戻す か ソース で直せます)";
 
 fn snap(v: f32, grid: i32) -> i32 {
     if grid <= 0 {
@@ -416,6 +477,7 @@ impl Session {
             diagnostics: Vec::new(),
             previews: Default::default(),
             dropped: Vec::new(),
+            prepared: None,
         }
     }
 
@@ -529,6 +591,30 @@ impl Session {
         self.on_instance = Some(Rc::new(f));
     }
 
+    /// Compiles the current text with the preview values, or takes the compile `set_property`
+    /// already made of exactly this text.
+    fn build(&mut self) -> Result<Built, Vec<Diagnostic>> {
+        let values = self.effective_values();
+        if let Some(p) = self.prepared.take()
+            && p.text == self.doc.text()
+            && p.path == self.doc.path()
+            && p.component == self.component
+            && p.values == values
+        {
+            return Ok(p.built);
+        }
+        compile_with(self.doc.text(), self.doc.path(), &self.component, &values)
+    }
+
+    /// The error band text for the current diagnostics: the first message and the ways out;
+    /// empty when the document compiles.
+    pub fn diagnostic_banner(&self) -> String {
+        match self.diagnostics.first() {
+            Some(d) => format!("{} {DIAGNOSTIC_HINT}", d.message),
+            None => String::new(),
+        }
+    }
+
     fn snapshot_doc(&self) -> Document {
         Document::new(self.doc.path().to_path_buf(), self.doc.text().to_string())
     }
@@ -537,7 +623,7 @@ impl Session {
     /// together with the instance, when the container runs the factory, so geometry queries
     /// always see an instance and the text it was built from.
     pub fn rebuild(&mut self) -> Option<slint::ComponentFactory> {
-        match compile_with(self.doc.text(), self.doc.path(), &self.component, &self.effective_values()) {
+        match self.build() {
             Ok(b) => {
                 let c = b.compiled;
                 self.dropped = b.dropped;
@@ -565,7 +651,7 @@ impl Session {
 
     /// Compiles and instantiates standalone (for tests).
     pub fn rebuild_standalone(&mut self, width: f32, height: f32) -> bool {
-        match compile_with(self.doc.text(), self.doc.path(), &self.component, &self.effective_values()) {
+        match self.build() {
             Ok(b) => {
                 let c = b.compiled;
                 self.dropped = b.dropped;
@@ -764,13 +850,24 @@ impl Session {
     /// and `AddDeclaration` stay allowed.
     pub fn apply(&mut self, op: Op) -> Result<(), SessionError> {
         let structural = !matches!(op, Op::SetBindings { .. } | Op::AddDeclaration { .. });
-        if structural && !self.diagnostics.is_empty() {
+        if structural && !self.diagnostics.is_empty() && !self.removal_is_safe(&op) {
             return Err(SessionError::Compile(self.diagnostics.clone()));
         }
         if let Some(p) = self.doc.apply(op)? {
             self.selection = Some(p);
         }
         Ok(())
+    }
+
+    /// Deleting is the way out of a document that does not compile, so it stays possible then:
+    /// the path comes from the document's own tree (not from the stale preview) and the edit
+    /// must not add a syntax error.
+    fn removal_is_safe(&self, op: &Op) -> bool {
+        matches!(op, Op::RemoveElement { .. })
+            && self
+                .doc
+                .preview_apply(op.clone())
+                .is_ok_and(|t| self.refuse_new_syntax_errors(&t).is_ok())
     }
 
     /// Moves the selected element into a new component `name`; the selection becomes the
@@ -838,15 +935,19 @@ impl Session {
         }
         let mut rows: Vec<PropRow> = names
             .iter()
-            .map(|n| PropRow {
-                name: n.to_string(),
-                expr: info
+            .map(|n| {
+                let expr = info
                     .bindings
                     .iter()
                     .find(|b| b.name == *n)
                     .map(|b| b.expr.clone())
-                    .unwrap_or_default(),
-                kind: prop_kind(n),
+                    .unwrap_or_default();
+                PropRow {
+                    name: n.to_string(),
+                    shown: field_text(prop_kind(n), &expr),
+                    expr,
+                    kind: prop_kind(n),
+                }
             })
             .collect();
         for b in &info.bindings {
@@ -854,6 +955,7 @@ impl Session {
                 rows.push(PropRow {
                     name: b.name.clone(),
                     expr: b.expr.clone(),
+                    shown: field_text(prop_kind(&b.name), &b.expr),
                     kind: prop_kind(&b.name),
                 });
             }
@@ -862,6 +964,11 @@ impl Session {
     }
 
     /// Sets (or, for an empty value, removes) a property of the selection.
+    ///
+    /// The edit is made on a scratch copy of the text first. It is refused with `Rejected`,
+    /// leaving the document, history and preview untouched, when it would add a syntax error
+    /// or, while the document compiles, make it stop compiling. A compile that succeeded is
+    /// kept and reused by the next `rebuild`.
     pub fn set_property(&mut self, name: &str, value: &str) -> Result<(), SessionError> {
         let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
         self.refuse_if_mismatch()?;
@@ -872,7 +979,11 @@ impl Session {
         } else {
             value.trim()
         };
-        let expr = (!value.is_empty()).then(|| normalise(kind, value));
+        let expr = if value.is_empty() {
+            None
+        } else {
+            Some(normalise(kind, value).map_err(SessionError::Rejected)?)
+        };
         let current = self
             .properties()
             .into_iter()
@@ -882,7 +993,39 @@ impl Session {
         if current == expr.clone().unwrap_or_default() {
             return Ok(());
         }
-        self.apply(Op::SetBindings { path, bindings: vec![(name.to_string(), expr)] })
+        let op = Op::SetBindings { path, bindings: vec![(name.to_string(), expr)] };
+        let new_text = self.doc.preview_apply(op.clone())?;
+        self.refuse_new_syntax_errors(&new_text)?;
+        let mut built = None;
+        // A document that already does not compile is not made worse by one more binding;
+        // the user may be on the way to fixing it.
+        if self.diagnostics.is_empty() {
+            let values = self.effective_values();
+            match compile_with(&new_text, self.doc.path(), &self.component, &values) {
+                Ok(b) => built = Some((values, b)),
+                Err(d) => return Err(SessionError::Rejected(short(&first_message(&d)))),
+            }
+        }
+        self.apply(op)?;
+        if let Some((values, b)) = built {
+            debug_assert_eq!(self.doc.text(), new_text);
+            self.prepared = Some(Prepared {
+                text: new_text,
+                path: self.doc.path().to_path_buf(),
+                component: self.component.clone(),
+                values,
+                built: b,
+            });
+        }
+        Ok(())
+    }
+
+    /// `Rejected` when `new_text` has a syntax error the current text does not have.
+    fn refuse_new_syntax_errors(&self, new_text: &str) -> Result<(), SessionError> {
+        match slint_doc::new_syntax_errors(self.doc.text(), new_text, self.doc.path()).first() {
+            Some(e) => Err(SessionError::Rejected(short(e))),
+            None => Ok(()),
+        }
     }
 
     /// Byte range of the source the Source tab shows: the selected element, else the whole
