@@ -1,6 +1,6 @@
 import { Palette } from "std-widgets.slint";
 import { Canvas, GuideBand, TidyMark } from "canvas.slint";
-import { BottomPanel, KbBar, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, PreviewItem, ExtractDialog, ParamDialog, InferDialog, InferItem, RecoveryDialog, FileActions, FileOpDialog, SettingsSection, GitHubActions } from "panels.slint";
+import { BottomPanel, KbBar, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, PreviewItem, ExtractDialog, ParamDialog, InferDialog, InferItem, RecoveryDialog, FileActions, FileOpDialog, DeleteDialog, SettingsSection, GitHubActions } from "panels.slint";
 import { GitHubDialog } from "github.slint";
 export { TreeRowItem, PropItem, PreviewItem, GuideBand, TidyMark, InferItem }
 
@@ -93,6 +93,10 @@ export component Editor inherits Window {
     in-out property <bool> recovery-open;
     // File operation dialog: 0 closed, 1 new file, 2 rename file, 3 rename project, 4 save as.
     in-out property <int> file-op;
+    // Delete-project confirmation: the project asked about and the unsent-changes warning.
+    in-out property <bool> delete-open;
+    in property <string> delete-project;
+    in property <string> delete-warning;
     // The project whose files the File menu lists (the glue moves it after renames).
     in-out property <string> menu-project: root.current-project;
 
@@ -126,6 +130,9 @@ export component Editor inherits Window {
     callback save();
     callback open(string /* project */, string /* file */);
     callback select-project(string);
+    // 削除 was tapped for this project: the glue fills the dialog (or refuses).
+    callback delete-ask(string);
+    callback delete-run(string);
     callback create-project(string);
     callback choose-component(string);
     callback zoom(float /* multiplier */);
@@ -653,6 +660,7 @@ export component Editor inherits Window {
                 NewProject {
                     create(n) => { root.create-project(n); root.menu-project = n; root.select-project(n); }
                     rename => { root.menu-open = false; root.dialog-error = ""; root.file-op = 3; }
+                    delete => { root.menu-open = false; root.delete-ask(root.menu-project); }
                 }
                 GitHubActions {
                     sync => { root.menu-open = false; root.gh-open(); }
@@ -727,6 +735,14 @@ export component Editor inherits Window {
         edited => { root.dialog-error = ""; }
         run(n, p) => { root.file-op-run(root.file-op, n, p); }
         close => { root.file-op = 0; root.dialog-error = ""; }
+    }
+
+    if root.delete-open: DeleteDialog {
+        project: root.delete-project;
+        warning: root.delete-warning;
+        top-limit: root.inset-top;
+        confirmed => { root.delete-run(root.delete-project); }
+        close => { root.delete-open = false; }
     }
 
     if root.recovery-open: RecoveryDialog {

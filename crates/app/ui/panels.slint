@@ -585,6 +585,7 @@ export component MenuList inherits Rectangle {
 export component NewProject inherits HorizontalLayout {
     callback create(string);
     callback rename();
+    callback delete();
     spacing: 6px;
     height: 44px;
     name := LineEdit { placeholder-text: "new project"; }
@@ -599,6 +600,7 @@ export component NewProject inherits HorizontalLayout {
         }
     }
     ToolButton { text: "Rename"; min-width: 64px; clicked => { root.rename(); } }
+    ToolButton { text: "削除"; min-width: 52px; clicked => { root.delete(); } }
 }
 
 // Buttons acting on the files of the selected project and on the open file.
@@ -1006,6 +1008,50 @@ export component FileOpDialog inherits ModalCard {
                 text: root.mode == 1 ? "Create" : root.mode == 4 ? "Save" : "OK";
                 enabled: name.text != "";
                 clicked => { root.run(name.text, root.target); }
+            }
+        }
+    }
+}
+
+// Asks before a project is deleted for good. `warning` is empty unless the project has
+// changes that were not sent to GitHub.
+export component DeleteDialog inherits ModalCard {
+    in property <string> project;
+    in property <string> warning;
+    callback confirmed();
+    callback close();
+
+    VerticalLayout {
+        spacing: 8px;
+        Text {
+            text: "プロジェクト「" + root.project + "」を削除します。元に戻せません。";
+            color: white;
+            font-size: 15px;
+            wrap: word-wrap;
+        }
+        if root.warning != "": Text {
+            text: root.warning;
+            color: #ffcc80;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            height: 44px;
+            ToolButton { text: "キャンセル"; min-height: 44px; clicked => { root.close(); } }
+            Rectangle {
+                min-width: 44px;
+                min-height: 44px;
+                background: del.pressed ? #b71c1c : #d32f2f;
+                border-radius: 4px;
+                Text {
+                    text: "削除";
+                    color: white;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                del := TouchArea { clicked => { root.confirmed(); } }
             }
         }
     }

@@ -20,6 +20,10 @@ const SETTINGS: &str = ".settings";
 /// echoed with them). Readable by the app only where the platform allows it.
 const GITHUB_TOKEN: &str = ".github-token";
 
+/// A project being deleted is first renamed to `{DELETING}{name}` (dot names are never
+/// listed); whatever is left of such a folder is removed when the store is opened.
+const DELETING: &str = ".deleting-";
+
 /// The only keys `setting` / `set_setting` accept.
 pub const SETTING_KEYS: [&str; 1] = ["tidy_tolerance"];
 
@@ -204,6 +208,11 @@ pub trait ProjectStore {
     fn rename_file(&self, project: &str, old: &str, new: &str) -> io::Result<String>;
     /// Renames a project directory; never overwrites.
     fn rename_project(&self, old: &str, new: &str) -> io::Result<()>;
+    /// Deletes the project with its files and recovery copies, for good. A `last_open` that
+    /// points into it is cleared. `NotFound` for an unknown project.
+    fn delete_project(&self, _name: &str) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "this store cannot delete projects"))
+    }
     /// Where the file lives on disk, so that `import`s and assets next to it resolve in the
     /// preview. `None` for stores that are not backed by files.
     fn location(&self, _project: &str, _file: &str) -> Option<PathBuf> {
@@ -271,7 +280,9 @@ pub fn check_name(name: &str) -> io::Result<()> {
 impl LocalStore {
     pub fn new(root: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(&root)?;
-        Ok(Self { token_dir: root.clone(), root })
+        let store = Self { token_dir: root.clone(), root };
+        store.clean_deleting();
+        Ok(store)
     }
 
     /// Like `new`, but the GitHub token is kept in `private` (e.g. Android's internal data
@@ -281,6 +292,7 @@ impl LocalStore {
         fs::create_dir_all(&root)?;
         fs::create_dir_all(&private)?;
         let store = Self { root, token_dir: private };
+        store.clean_deleting();
         store.migrate_token()?;
         Ok(store)
     }
@@ -295,6 +307,16 @@ impl LocalStore {
             self.set_github_token(&text)?;
         }
         remove_if_exists(&old)
+    }
+
+    /// Removes the leftovers of an interrupted `delete_project`. Best effort.
+    fn clean_deleting(&self) {
+        let Ok(entries) = fs::read_dir(&self.root) else { return };
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(DELETING) {
+                remove_tree(&entry.path());
+            }
+        }
     }
 
     fn project_dir(&self, project: &str) -> io::Result<PathBuf> {
@@ -321,6 +343,19 @@ fn rename_if_exists(from: &Path, to: &Path) -> io::Result<()> {
     match fs::rename(from, to) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         r => r,
+    }
+}
+
+/// Removes a folder (or a stray file or symlink) without following symlinks. Best effort.
+fn remove_tree(path: &Path) {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => {
+            let _ = fs::remove_dir_all(path);
+        }
+        Ok(_) => {
+            let _ = fs::remove_file(path);
+        }
+        Err(_) => {}
     }
 }
 
@@ -500,6 +535,26 @@ impl ProjectStore for LocalStore {
         {
             self.set_last_open(new, &f)?;
         }
+        Ok(())
+    }
+
+    fn delete_project(&self, name: &str) -> io::Result<()> {
+        let dir = self.project_dir(name)?;
+        // A real folder only: a symlink is not a project (it is never listed either).
+        if !fs::symlink_metadata(&dir)?.is_dir() {
+            return Err(io::ErrorKind::NotFound.into());
+        }
+        // Out of the way under one atomic rename; a crash after it leaves only a hidden
+        // folder that the next start removes, never a half-deleted project.
+        let gone = self.root.join(format!("{DELETING}{name}"));
+        remove_tree(&gone);
+        fs::rename(&dir, &gone)?;
+        if let Some((p, _)) = self.last_open()?
+            && p == name
+        {
+            remove_if_exists(&self.root.join(LAST_OPEN))?;
+        }
+        remove_tree(&gone);
         Ok(())
     }
 
@@ -955,6 +1010,118 @@ mod tests {
         assert_eq!(s.projects().unwrap(), vec!["q"]);
         assert_eq!(s.take_recovery("q", "main.slint").unwrap().as_deref(), Some("draft"));
         assert_eq!(s.last_open().unwrap(), Some(("q".into(), "main.slint".into())));
+    }
+
+    #[test]
+    fn delete_project_removes_folder_recovery_and_last_open() {
+        let (d, s) = store();
+        s.create_project("p").unwrap();
+        s.create_project("q").unwrap();
+        s.write_recovery("p", "main.slint", "draft").unwrap();
+        s.write("p", "main.slint", "x").unwrap(); // leaves a .bak too
+        fs::create_dir_all(d.path().join("projects/p/sub/deep")).unwrap();
+        fs::write(d.path().join("projects/p/sub/deep/f.bin"), [1]).unwrap();
+        s.set_last_open("p", "main.slint").unwrap();
+        s.delete_project("p").unwrap();
+        assert_eq!(s.projects().unwrap(), vec!["q"]);
+        assert!(!d.path().join("projects/p").exists());
+        assert_eq!(fs::read_dir(d.path().join("projects")).unwrap().count(), 1, "no temp left");
+        assert_eq!(s.last_open().unwrap(), None);
+        assert_eq!(s.take_recovery("p", "main.slint").unwrap(), None);
+        // The name is free again, and a fresh project does not see the old recovery.
+        s.create_project("p").unwrap();
+        assert_eq!(s.take_recovery("p", "main.slint").unwrap(), None);
+    }
+
+    #[test]
+    fn delete_project_keeps_other_last_open_and_the_token() {
+        let (d, s) = store();
+        s.create_project("p").unwrap();
+        s.create_project("o").unwrap();
+        s.set_github_token("tok").unwrap();
+        s.set_setting("tidy_tolerance", "4").unwrap();
+        s.set_last_open("o", "main.slint").unwrap();
+        s.delete_project("p").unwrap();
+        assert_eq!(s.last_open().unwrap(), Some(("o".into(), "main.slint".into())));
+        assert_eq!(s.github_token().as_deref(), Some("tok"));
+        assert_eq!(s.setting("tidy_tolerance").as_deref(), Some("4"));
+        // With a private token dir the token is outside the root and untouched too.
+        let private = d.path().join("private");
+        let s2 = LocalStore::with_private_dir(d.path().join("projects2"), private.clone()).unwrap();
+        s2.create_project("p").unwrap();
+        s2.set_github_token("tok2").unwrap();
+        s2.delete_project("p").unwrap();
+        assert_eq!(s2.github_token().as_deref(), Some("tok2"));
+        assert!(private.join(GITHUB_TOKEN).is_file());
+    }
+
+    #[test]
+    fn delete_project_refuses_bad_and_unknown_names() {
+        let (d, s) = store();
+        s.create_project("p").unwrap();
+        fs::write(d.path().join("projects/file"), "x").unwrap();
+        for n in ["", "..", "a/b", ".hidden", "x..y", ".github-token", ".deleting-p"] {
+            assert_eq!(s.delete_project(n).unwrap_err().kind(), io::ErrorKind::InvalidInput, "{n:?}");
+        }
+        assert_eq!(s.delete_project("nope").unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(s.delete_project("file").unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert!(d.path().join("projects/file").is_file());
+        assert_eq!(s.projects().unwrap(), vec!["p"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_project_never_follows_symlinks_out_of_the_root() {
+        let (d, s) = store();
+        let outside = d.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep.txt"), "keep").unwrap();
+        // A symlink inside a project is removed as a link, not followed.
+        s.create_project("p").unwrap();
+        std::os::unix::fs::symlink(&outside, d.path().join("projects/p/link")).unwrap();
+        s.delete_project("p").unwrap();
+        assert_eq!(fs::read_to_string(outside.join("keep.txt")).unwrap(), "keep");
+        // A project folder that is itself a symlink is not a project.
+        std::os::unix::fs::symlink(&outside, d.path().join("projects/evil")).unwrap();
+        assert_eq!(s.delete_project("evil").unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(fs::read_to_string(outside.join("keep.txt")).unwrap(), "keep");
+    }
+
+    #[test]
+    fn a_leftover_deleting_folder_is_hidden_and_cleaned_at_start() {
+        let (d, s) = store();
+        s.create_project("p").unwrap();
+        let left = d.path().join("projects/.deleting-q");
+        fs::create_dir_all(left.join("sub")).unwrap();
+        fs::write(left.join("sub/main.slint"), "x").unwrap();
+        assert_eq!(s.projects().unwrap(), vec!["p"]);
+        let s = LocalStore::new(d.path().join("projects")).unwrap();
+        assert!(!left.exists());
+        assert_eq!(s.projects().unwrap(), vec!["p"]);
+        // Also cleaned when a stale one is in the way of a new delete.
+        fs::create_dir_all(&left).unwrap();
+        s.create_project("q").unwrap();
+        s.delete_project("q").unwrap();
+        assert!(!left.exists());
+    }
+
+    #[test]
+    fn default_delete_is_unsupported() {
+        struct Nope;
+        impl ProjectStore for Nope {
+            fn projects(&self) -> io::Result<Vec<String>> { Ok(vec![]) }
+            fn create_project(&self, _: &str) -> io::Result<()> { Ok(()) }
+            fn files(&self, _: &str) -> io::Result<Vec<String>> { Ok(vec![]) }
+            fn create_file_with(&self, _: &str, _: &str, _: &str) -> io::Result<String> { Ok(String::new()) }
+            fn rename_file(&self, _: &str, _: &str, _: &str) -> io::Result<String> { Ok(String::new()) }
+            fn rename_project(&self, _: &str, _: &str) -> io::Result<()> { Ok(()) }
+            fn read(&self, _: &str, _: &str) -> io::Result<String> { Ok(String::new()) }
+            fn write(&self, _: &str, _: &str, _: &str) -> io::Result<()> { Ok(()) }
+            fn write_recovery(&self, _: &str, _: &str, _: &str) -> io::Result<()> { Ok(()) }
+            fn take_recovery(&self, _: &str, _: &str) -> io::Result<Option<String>> { Ok(None) }
+            fn clear_recovery(&self, _: &str, _: &str) -> io::Result<()> { Ok(()) }
+        }
+        assert_eq!(Nope.delete_project("p").unwrap_err().kind(), io::ErrorKind::Unsupported);
     }
 
     #[test]

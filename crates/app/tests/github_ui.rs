@@ -876,3 +876,58 @@ fn anchor_edits_are_refused_while_the_project_is_locked() {
     release.send(()).unwrap();
     wait(e);
 }
+
+#[test]
+fn delete_warns_about_changes_not_sent_to_github() {
+    let env = setup(Some(TOKEN));
+    let e = &env.editor;
+    linked(&env);
+    // Freshly cloned: nothing unsent, so no warning.
+    e.invoke_delete_ask("ui".into());
+    assert!(e.get_delete_open());
+    assert_eq!(e.get_delete_warning().as_str(), "");
+    e.set_delete_open(false);
+    // One edited file and one new file.
+    let dir = env.root().join("ui");
+    std::fs::write(dir.join("other.slint"), "export component Other inherits Rectangle { width: 5px; }\n").unwrap();
+    std::fs::write(dir.join("new.slint"), "export component N inherits Rectangle {}\n").unwrap();
+    e.invoke_delete_ask("ui".into());
+    assert!(e.get_delete_open());
+    assert_eq!(e.get_delete_project().as_str(), "ui");
+    assert_eq!(e.get_delete_warning().as_str(), "GitHub に送っていない変更が 2 件あります");
+    // A project that is not linked has no warning.
+    e.invoke_delete_ask("default".into());
+    assert_eq!(e.get_delete_warning().as_str(), "");
+    // Cancel (the dialog sets this) deletes nothing.
+    e.set_delete_open(false);
+    assert!(dir.is_dir());
+    // Confirming deletes the open, linked project and opens the other one.
+    e.invoke_delete_ask("ui".into());
+    e.invoke_delete_run("ui".into());
+    assert!(!dir.exists());
+    assert_eq!(strings(e.get_projects()), vec!["default"]);
+    assert_eq!(e.get_current_project().as_str(), "default");
+    assert_eq!(e.get_toast_text().as_str(), "削除しました");
+}
+
+#[test]
+fn the_project_in_a_transfer_cannot_be_deleted() {
+    let env = setup(Some(TOKEN));
+    let e = &env.editor;
+    linked(&env);
+    e.invoke_gh_open();
+    let (at_call, release) = arm(&env);
+    e.invoke_gh_pull();
+    reached(&at_call);
+    e.invoke_delete_ask("ui".into());
+    assert!(!e.get_delete_open());
+    assert_eq!(e.get_error_text().as_str(), LOCKED);
+    e.invoke_delete_run("ui".into());
+    assert_eq!(e.get_error_text().as_str(), LOCKED);
+    assert!(env.root().join("ui").is_dir());
+    // Another project can still go.
+    e.invoke_delete_ask("default".into());
+    assert!(e.get_delete_open());
+    release.send(()).unwrap();
+    wait(e);
+}

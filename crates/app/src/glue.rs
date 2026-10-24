@@ -1419,6 +1419,86 @@ impl Glue {
         }
     }
 
+    /// 削除 was tapped for `project`: opens the confirmation (with the warning about changes
+    /// not sent to GitHub), or says why not.
+    fn delete_ask(&mut self, project: &str) {
+        self.begin_action();
+        let ed = self.editor();
+        ed.set_delete_open(false);
+        if self.locked(project) {
+            self.set_error(LOCKED_TEXT);
+            return;
+        }
+        if !self.store.projects().is_ok_and(|ps| ps.iter().any(|p| p == project)) {
+            self.set_error(&format!("プロジェクト {project} が見つかりません"));
+            return;
+        }
+        let warning = crate::github::project_dir(&*self.store, project)
+            .ok()
+            .and_then(|dir| crate::github::unsent_changes(&dir))
+            .filter(|n| *n > 0)
+            .map(|n| format!("GitHub に送っていない変更が {n} 件あります"))
+            .unwrap_or_default();
+        ed.set_delete_project(project.into());
+        ed.set_delete_warning(warning.into());
+        ed.set_delete_open(true);
+    }
+
+    /// The confirmation was accepted. If `project` is the open one, another project is opened
+    /// (the same choice as at startup, which makes `default` when none is left).
+    fn delete_run(&mut self, project: &str) {
+        self.begin_action();
+        let ed = self.editor();
+        ed.set_delete_open(false);
+        if self.locked(project) {
+            self.set_error(LOCKED_TEXT);
+            return;
+        }
+        let is_open = project == self.project;
+        if is_open {
+            self.discard_source_edits();
+            // Unsaved edits go with the project; the pending recovery prompt is moot.
+            self.recovered = None;
+            ed.set_recovery_open(false);
+        }
+        if let Err(e) = self.store.delete_project(project) {
+            self.set_error(&format!("プロジェクト {project} を削除できませんでした: {e}"));
+            return;
+        }
+        if is_open {
+            self.open_after_delete();
+        } else {
+            self.refresh_lists();
+        }
+        if ed.get_menu_project().as_str() == project {
+            ed.set_menu_project(self.project.as_str().into());
+        }
+        self.toast("削除しました");
+    }
+
+    /// The open project is gone: opens what the app would open at startup.
+    fn open_after_delete(&mut self) {
+        self.nav.clear();
+        let target = startup_target(&*self.store).and_then(|(p, f)| {
+            Self::load(&*self.store, &self.me, &p, &f).map(|s| (p, f, s))
+        });
+        match target {
+            Ok((p, f, session)) => self.show_loaded(&p, &f, session),
+            Err(e) => {
+                // Nothing can be opened: an empty document that is never saved or recovered.
+                self.loaded = false;
+                self.last_recovery = None;
+                self.project = String::new();
+                self.file = String::new();
+                self.session = Session::new(Document::new(PathBuf::from("main.slint"), String::new()));
+                self.editor().set_has_selection(false);
+                self.refresh_lists();
+                self.rebuild();
+                self.set_error(&format!("開けませんでした: {e}"));
+            }
+        }
+    }
+
     fn rename_project(&mut self, project: &str, name: &str) {
         let is_open = project == self.project;
         if is_open && !self.save_before_op() {
@@ -1779,6 +1859,8 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_extract_run, |g, n| g.extract_run(&n));
     on!(on_declaration_add, |g, k, t, n| g.declaration_add(k, &t, &n));
     on!(on_recovery_answered, |g, r| g.recovery_answered(r));
+    on!(on_delete_ask, |g, p| g.delete_ask(&p));
+    on!(on_delete_run, |g, p| g.delete_run(&p));
     on!(on_file_op_run, |g, m, n, p| g.file_op_run(m, &n, &p));
     on!(on_guide_edited, |g, p, v| g.guide_edited(&p, &v));
     on!(on_gh_open, |g| g.gh_open());

@@ -112,6 +112,10 @@ impl ProjectStore for LockedStore {
         }
         self.inner.rename_project(old, new)
     }
+    fn delete_project(&self, name: &str) -> io::Result<()> {
+        guard_write!(self, name);
+        self.inner.delete_project(name)
+    }
     fn location(&self, project: &str, file: &str) -> Option<PathBuf> {
         self.inner.location(project, file)
     }
@@ -187,12 +191,16 @@ mod tests {
         assert!(denied(s.create_file_with("a", "n", "x").map(|_| ())));
         assert!(denied(s.rename_file("a", "main.slint", "m").map(|_| ())));
         assert!(denied(s.rename_project("a", "c")));
+        assert!(denied(s.delete_project("a")));
+        assert!(s.projects().unwrap().contains(&"a".to_string()));
         assert!(s.rename_project("b", "a").is_err());
         assert!(denied(s.set_component_preview("a", "main.slint", "Main", &Default::default())));
         // Reading and the other project are fine.
         assert!(s.read("a", "main.slint").is_ok());
         assert!(s.write("b", "main.slint", "x").is_ok());
         assert_eq!(s.projects().unwrap(), vec!["a", "b"]);
+        assert!(s.delete_project("b").is_ok(), "other projects can go");
+        assert_eq!(s.projects().unwrap(), vec!["a"]);
         *lock.borrow_mut() = None;
         assert!(s.write("a", "main.slint", "x").is_ok());
     }

@@ -219,6 +219,13 @@ pub fn view(dir: &Path) -> View {
     }
 }
 
+/// How many local changes the project has that were not sent to GitHub; `None` when it is
+/// not linked (no `.sync`) or cannot be told.
+pub fn unsent_changes(dir: &Path) -> Option<usize> {
+    SyncState::load(dir).ok().flatten()?;
+    local_changes(dir).ok().map(|c| c.len())
+}
+
 /// Like `view`, but without scanning the files: a transfer is writing them right now. Only
 /// the `.sync` (always replaced atomically) is read.
 pub fn view_busy(dir: &Path) -> View {
