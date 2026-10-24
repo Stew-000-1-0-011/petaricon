@@ -77,6 +77,8 @@ pub trait GitHubApi {
     fn branch_head(&self, repo: &str, branch: &str) -> Result<String, ApiError>;
     /// Tree sha of a commit.
     fn commit_tree(&self, repo: &str, commit: &str) -> Result<String, ApiError>;
+    /// Entries directly inside a tree (no recursion); sub-trees have kind "tree".
+    fn tree_shallow(&self, repo: &str, tree: &str) -> Result<Vec<TreeEntry>, ApiError>;
     /// Whole tree, recursively. Must return `ApiError::Truncated` if GitHub truncated it.
     fn tree_recursive(&self, repo: &str, tree: &str) -> Result<Vec<TreeEntry>, ApiError>;
     fn blob(&self, repo: &str, sha: &str) -> Result<Vec<u8>, ApiError>;
@@ -203,6 +205,27 @@ fn enc(s: &str) -> String {
     out
 }
 
+fn parse_tree(v: &Value) -> Result<Vec<TreeEntry>, ApiError> {
+    if v.get("truncated").and_then(Value::as_bool) == Some(true) {
+        return Err(ApiError::Truncated);
+    }
+    let items = v
+        .get("tree")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError::Other(200, "missing field tree".into()))?;
+    items
+        .iter()
+        .map(|e| {
+            Ok(TreeEntry {
+                path: str_at(e, &["path"])?.to_string(),
+                sha: str_at(e, &["sha"])?.to_string(),
+                mode: str_at(e, &["mode"])?.to_string(),
+                kind: str_at(e, &["type"])?.to_string(),
+            })
+        })
+        .collect()
+}
+
 fn str_at<'a>(v: &'a Value, keys: &[&str]) -> Result<&'a str, ApiError> {
     let mut cur = v;
     for k in keys {
@@ -229,30 +252,18 @@ impl GitHubApi for HttpApi {
         Ok(str_at(&v, &["tree", "sha"])?.to_string())
     }
 
+    fn tree_shallow(&self, repo: &str, tree: &str) -> Result<Vec<TreeEntry>, ApiError> {
+        let v = self.get(&format!("/repos/{}/git/trees/{}", enc(repo), enc(tree)))?;
+        parse_tree(&v)
+    }
+
     fn tree_recursive(&self, repo: &str, tree: &str) -> Result<Vec<TreeEntry>, ApiError> {
         let v = self.get(&format!(
             "/repos/{}/git/trees/{}?recursive=1",
             enc(repo),
             enc(tree)
         ))?;
-        if v.get("truncated").and_then(Value::as_bool) == Some(true) {
-            return Err(ApiError::Truncated);
-        }
-        let items = v
-            .get("tree")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ApiError::Other(200, "missing field tree".into()))?;
-        items
-            .iter()
-            .map(|e| {
-                Ok(TreeEntry {
-                    path: str_at(e, &["path"])?.to_string(),
-                    sha: str_at(e, &["sha"])?.to_string(),
-                    mode: str_at(e, &["mode"])?.to_string(),
-                    kind: str_at(e, &["type"])?.to_string(),
-                })
-            })
-            .collect()
+        parse_tree(&v)
     }
 
     fn blob(&self, repo: &str, sha: &str) -> Result<Vec<u8>, ApiError> {

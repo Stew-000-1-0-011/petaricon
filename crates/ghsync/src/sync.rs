@@ -25,6 +25,10 @@ pub enum SyncError {
     NothingToPush,
     /// No files under the folder on that branch.
     EmptyFolder,
+    /// `clone_into` needs a new or empty directory.
+    NotEmptyDir,
+    /// The path is not waiting in the conflict list.
+    NotAConflict(String),
     /// Something GitHub returned did not add up (bad path, checksum).
     Corrupt(String),
 }
@@ -41,6 +45,8 @@ impl fmt::Display for SyncError {
                 write!(f, "files changed on both sides must be resolved first")
             }
             SyncError::NothingToPush => write!(f, "nothing to push"),
+            SyncError::NotEmptyDir => write!(f, "the project folder is not empty"),
+            SyncError::NotAConflict(p) => write!(f, "{p} is not in conflict"),
             SyncError::EmptyFolder => write!(f, "no files found in that folder"),
             SyncError::Corrupt(m) => write!(f, "unexpected data: {m}"),
         }
@@ -106,27 +112,30 @@ fn normalize_folder(folder: &str) -> String {
     folder.trim().trim_matches('/').to_string()
 }
 
-/// Files of the commit under the state's folder, by project-relative path.
+/// Files of the commit under the folder, by project-relative path. Walks the folder's path
+/// through shallow trees so only the folder's subtree is listed recursively.
 fn remote_files(api: &dyn GitHubApi, repo: &str, folder: &str, commit: &str) -> Result<Remote> {
-    let tree = api.commit_tree(repo, commit)?;
-    let prefix = if folder.is_empty() {
-        String::new()
-    } else {
-        format!("{folder}/")
-    };
+    let mut tree = api.commit_tree(repo, commit)?;
+    for seg in folder.split('/').filter(|s| !s.is_empty()) {
+        let next = api
+            .tree_shallow(repo, &tree)?
+            .into_iter()
+            .find(|e| e.kind == "tree" && e.path == seg);
+        match next {
+            Some(e) => tree = e.sha,
+            None => return Ok(Remote::new()),
+        }
+    }
     let mut out = Remote::new();
     for e in api.tree_recursive(repo, &tree)? {
         if e.kind != "blob" || e.mode == "120000" {
             continue;
         }
-        let Some(rel) = e.path.strip_prefix(&prefix) else {
-            continue;
-        };
-        if is_managed(rel) || !is_safe_rel(rel) {
+        if is_managed(&e.path) || !is_safe_rel(&e.path) {
             continue;
         }
         out.insert(
-            rel.to_string(),
+            e.path,
             FileEntry {
                 sha: e.sha,
                 mode: e.mode,
@@ -189,7 +198,18 @@ pub fn clone_into(
     if SyncState::load(project_dir)?.is_some() {
         return Err(SyncError::AlreadyLinked);
     }
+    if project_dir.is_dir() && std::fs::read_dir(project_dir)?.next().is_some() {
+        return Err(SyncError::NotEmptyDir);
+    }
     let folder = normalize_folder(folder);
+    if folder
+        .split('/')
+        .any(|s| !s.is_empty() && (s == "." || s == ".."))
+        || folder.contains("//")
+        || folder.contains('\\')
+    {
+        return Err(SyncError::Corrupt(format!("bad folder {folder}")));
+    }
     let head = api.branch_head(repo, branch)?;
     let remote = remote_files(api, repo, &folder, &head)?;
     if remote.is_empty() {
@@ -233,6 +253,10 @@ pub fn pull(api: &dyn GitHubApi, project_dir: &Path) -> Result<PullReport> {
     }
 
     let remote = remote_files(api, &state.repo, &state.folder, &head)?;
+    if remote.is_empty() {
+        // The folder is gone (or unreachable): never delete everything because of that.
+        return Err(SyncError::EmptyFolder);
+    }
     let mut files = state.files.clone();
     let mut to_write: Vec<(String, FileEntry)> = Vec::new();
     let mut removes = Vec::new();
@@ -303,35 +327,73 @@ pub fn pull(api: &dyn GitHubApi, project_dir: &Path) -> Result<PullReport> {
     Ok(report)
 }
 
-/// Replaces the local `path` with the remote version, keeping the local one as
-/// `<path>.local`. When the last conflict is resolved, the base moves to the pulled commit.
-pub fn take_remote(api: &dyn GitHubApi, project_dir: &Path, path: &str) -> Result<()> {
+fn conflict_context(
+    api: &dyn GitHubApi,
+    project_dir: &Path,
+    path: &str,
+) -> Result<(SyncState, String, Remote)> {
     if !is_safe_rel(path) || is_managed(path) {
         return Err(SyncError::Corrupt(format!("bad path {path}")));
     }
-    let mut state = load_state(project_dir)?;
-    let commit = match &state.pending_head {
-        Some(c) => c.clone(),
-        None => api.branch_head(&state.repo, &state.branch)?,
+    let state = load_state(project_dir)?;
+    let pending = match &state.pending_head {
+        Some(c) if state.conflicts.iter().any(|x| x == path) => c.clone(),
+        _ => return Err(SyncError::NotAConflict(path.to_string())),
     };
-    let remote = remote_files(api, &state.repo, &state.folder, &commit)?;
+    let remote = remote_files(api, &state.repo, &state.folder, &pending)?;
+    Ok((state, pending, remote))
+}
+
+/// Removes `path` from the conflicts; the base moves to the pulled commit with the last one.
+fn finish_conflict(state: &mut SyncState, path: &str) {
+    state.conflicts.retain(|c| c != path);
+    if state.conflicts.is_empty()
+        && let Some(c) = state.pending_head.take()
+    {
+        state.base_commit = c;
+    }
+    state.synced_at = now_secs();
+}
+
+/// First free `<name>.local`, `<name>.local.2`, ...
+fn local_copy_path(dest: &Path) -> PathBuf {
+    let first = PathBuf::from(format!("{}.local", dest.display()));
+    let mut n = 2;
+    let mut p = first.clone();
+    while p.exists() {
+        p = PathBuf::from(format!("{}.{n}", first.display()));
+        n += 1;
+    }
+    p
+}
+
+/// Conflict resolution "remote wins": replaces the local `path` with the remote version,
+/// keeping the local one as `<path>.local`.
+pub fn take_remote(api: &dyn GitHubApi, project_dir: &Path, path: &str) -> Result<()> {
+    let (mut state, _pending, remote) = conflict_context(api, project_dir, path)?;
     let remote_entry = remote.get(path);
     let bytes = match remote_entry {
         Some(e) => Some(download(api, &state.repo, e)?),
         None => None,
     };
     let dest = abs(project_dir, path);
-    let keep = PathBuf::from(format!("{}.local", dest.display()));
+    let keep = local_copy_path(&dest);
     let staged = match &bytes {
         Some(b) => Some(stage(&dest, b)?),
         None => None,
     };
+    let moved = dest.exists();
     let result = (|| -> io::Result<()> {
-        if dest.exists() {
+        if moved {
             std::fs::rename(&dest, &keep)?;
         }
-        if let Some(tmp) = &staged {
-            std::fs::rename(tmp, &dest)?;
+        if let Some(tmp) = &staged
+            && let Err(e) = std::fs::rename(tmp, &dest)
+        {
+            if moved {
+                let _ = std::fs::rename(&keep, &dest);
+            }
+            return Err(e);
         }
         Ok(())
     })();
@@ -349,13 +411,24 @@ pub fn take_remote(api: &dyn GitHubApi, project_dir: &Path, path: &str) -> Resul
             state.files.remove(path);
         }
     }
-    state.conflicts.retain(|c| c != path);
-    if state.conflicts.is_empty()
-        && let Some(c) = state.pending_head.take()
-    {
-        state.base_commit = c;
+    finish_conflict(&mut state, path);
+    state.save(project_dir)?;
+    Ok(())
+}
+
+/// Conflict resolution "mine wins": the local file stays as it is and counts as a local
+/// change on top of the pulled commit, so the next push sends it as a fast-forward.
+pub fn keep_local(api: &dyn GitHubApi, project_dir: &Path, path: &str) -> Result<()> {
+    let (mut state, _pending, remote) = conflict_context(api, project_dir, path)?;
+    match remote.get(path) {
+        Some(e) => {
+            state.files.insert(path.to_string(), e.clone());
+        }
+        None => {
+            state.files.remove(path);
+        }
     }
-    state.synced_at = now_secs();
+    finish_conflict(&mut state, path);
     state.save(project_dir)?;
     Ok(())
 }

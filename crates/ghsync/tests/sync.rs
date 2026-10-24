@@ -40,18 +40,22 @@ impl Fake {
     }
     /// Makes a commit on `branch` (child of its head if any) with the given changes.
     fn commit(&self, branch: &str, changes: &[(&str, Option<&[u8]>)]) -> String {
+        let with_mode: Vec<_> = changes.iter().map(|(p, c)| (*p, *c, "100644")).collect();
+        self.commit_modes(branch, &with_mode)
+    }
+    fn commit_modes(&self, branch: &str, changes: &[(&str, Option<&[u8]>, &str)]) -> String {
         let mut i = self.0.lock().unwrap();
         let parent = i.refs.get(branch).cloned();
         let mut listing = parent
             .as_ref()
             .map(|p| i.trees[&i.commits[p].0].clone())
             .unwrap_or_default();
-        for (path, content) in changes {
+        for (path, content, mode) in changes {
             match content {
                 Some(c) => {
                     let sha = git_blob_sha(c);
                     i.blobs.insert(sha.clone(), c.to_vec());
-                    listing.insert(path.to_string(), (sha, "100644".into()));
+                    listing.insert(path.to_string(), (sha, mode.to_string()));
                 }
                 None => {
                     listing.remove(*path);
@@ -116,19 +120,60 @@ impl GitHubApi for Fake {
             .map(|c| c.0.clone())
             .ok_or(ApiError::NotFound)
     }
+    fn tree_shallow(&self, _: &str, tree: &str) -> Result<Vec<TreeEntry>, ApiError> {
+        self.step("tree_shallow")?;
+        let i = self.0.lock().unwrap();
+        let (base, prefix) = tree.split_once(':').unwrap_or((tree, ""));
+        let mut out: BTreeMap<String, TreeEntry> = BTreeMap::new();
+        for (p, (s, m)) in &i.trees[base] {
+            let Some(rest) = p.strip_prefix(prefix) else {
+                continue;
+            };
+            match rest.split_once('/') {
+                None => {
+                    out.insert(
+                        rest.into(),
+                        TreeEntry {
+                            path: rest.into(),
+                            sha: s.clone(),
+                            mode: m.clone(),
+                            kind: kind_of(m),
+                        },
+                    );
+                }
+                Some((dir, _)) => {
+                    out.insert(
+                        dir.into(),
+                        TreeEntry {
+                            path: dir.into(),
+                            sha: format!("{base}:{prefix}{dir}/"),
+                            mode: "040000".into(),
+                            kind: "tree".into(),
+                        },
+                    );
+                }
+            }
+        }
+        Ok(out.into_values().collect())
+    }
     fn tree_recursive(&self, _: &str, tree: &str) -> Result<Vec<TreeEntry>, ApiError> {
         self.step("tree_recursive")?;
         let i = self.0.lock().unwrap();
-        if i.truncated {
+        // Only a listing of a whole commit tree can be truncated.
+        if i.truncated && !tree.contains(':') {
             return Err(ApiError::Truncated);
         }
-        Ok(i.trees[tree]
+        let (base, prefix) = tree.split_once(':').unwrap_or((tree, ""));
+        Ok(i.trees[base]
             .iter()
-            .map(|(p, (s, m))| TreeEntry {
-                path: p.clone(),
-                sha: s.clone(),
-                mode: m.clone(),
-                kind: "blob".into(),
+            .filter_map(|(p, (s, m))| {
+                let rel = p.strip_prefix(prefix)?;
+                Some(TreeEntry {
+                    path: rel.into(),
+                    sha: s.clone(),
+                    mode: m.clone(),
+                    kind: kind_of(m),
+                })
             })
             .collect())
     }
@@ -196,6 +241,14 @@ impl GitHubApi for Fake {
         }
         i.refs.insert(branch.to_string(), commit.to_string());
         Ok(())
+    }
+}
+
+fn kind_of(mode: &str) -> String {
+    if mode == "160000" {
+        "commit".into()
+    } else {
+        "blob".into()
     }
 }
 
@@ -306,10 +359,22 @@ fn clone_errors() {
     f.0.lock().unwrap().truncated = true;
     let d2 = tempfile::tempdir().unwrap();
     assert!(matches!(
-        clone_into(&f, REPO, "main", "ui", d2.path()),
+        clone_into(&f, REPO, "main", "", d2.path()),
         Err(SyncError::Api(ApiError::Truncated))
     ));
     assert!(snapshot(d2.path()).is_empty());
+    // the folder's subtree is listed on its own, so a huge repo root does not matter
+    let d3 = tempfile::tempdir().unwrap();
+    clone_into(&f, REPO, "main", "ui/sub", d3.path()).unwrap();
+    assert_eq!(read(d3.path(), "deep.slint"), b"deep\n");
+    // a non-empty directory is refused
+    let d4 = tempfile::tempdir().unwrap();
+    write(d4.path(), "mine.txt", b"x");
+    assert!(matches!(
+        clone_into(&f, REPO, "main", "ui", d4.path()),
+        Err(SyncError::NotEmptyDir)
+    ));
+    assert_eq!(snapshot(d4.path()).len(), 1);
 }
 
 #[test]
@@ -414,6 +479,14 @@ fn take_remote_rejects_bad_paths() {
     let d = cloned(&f);
     assert!(take_remote(&f, d.path(), "../x").is_err());
     assert!(take_remote(&f, d.path(), ".sync").is_err());
+    assert!(matches!(
+        take_remote(&f, d.path(), "main.slint"),
+        Err(SyncError::NotAConflict(_))
+    ));
+    assert!(matches!(
+        keep_local(&f, d.path(), "main.slint"),
+        Err(SyncError::NotAConflict(_))
+    ));
 }
 
 #[test]
@@ -469,20 +542,21 @@ fn push_makes_one_commit_with_only_changes() {
     assert_eq!(l["ui/new/file.slint"], b"fresh\n");
     assert_eq!(l["ui/sub/deep.slint"], b"deep\n");
     assert_eq!(l["README.md"], b"outside\n");
-    for k in l.keys() {
-        for bad in [
-            ".preview",
-            ".recovery",
-            "main.slint.bak",
-            "x.local",
-            ".last-open",
-            ".github-token",
-            ".sync",
-        ] {
-            assert!(!k.contains(bad) || k == "ui/old.bak", "{k} was sent");
-        }
-    }
-    assert!(!l.contains_key("ui/.settings") || l["ui/.settings"] == b"remote-managed");
+    let keys: Vec<&str> = l.keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        vec![
+            "README.md",
+            "ui/.settings",
+            "ui/img/pic.bin",
+            "ui/main.slint",
+            "ui/new/file.slint",
+            "ui/old.bak",
+            "ui/sub/deep.slint"
+        ]
+    );
+    assert_eq!(l["ui/.settings"], b"remote-managed");
+    assert_eq!(l["ui/old.bak"], b"bak");
     let st = SyncState::load(d.path()).unwrap().unwrap();
     assert_eq!(st.base_commit, r.commit);
     assert!(local_changes(d.path()).unwrap().is_empty());
@@ -629,4 +703,168 @@ fn unlinked_project() {
     assert!(matches!(pull(&f, d.path()), Err(SyncError::NotLinked)));
     assert!(matches!(local_changes(d.path()), Err(SyncError::NotLinked)));
     assert!(matches!(push(&f, d.path(), "m"), Err(SyncError::NotLinked)));
+}
+
+#[test]
+fn keep_local_pushes_my_version_on_the_new_head() {
+    let f = seeded();
+    let d = cloned(&f);
+    write(d.path(), "main.slint", b"mine\n");
+    let c = f.commit(
+        "main",
+        &[
+            ("ui/main.slint", Some(b"theirs\n")),
+            ("ui/sub/deep.slint", Some(b"d2\n")),
+        ],
+    );
+    assert_eq!(pull(&f, d.path()).unwrap().conflicts, vec!["main.slint"]);
+    keep_local(&f, d.path(), "main.slint").unwrap();
+    assert_eq!(read(d.path(), "main.slint"), b"mine\n");
+    assert!(!d.path().join("main.slint.local").exists());
+    let st = SyncState::load(d.path()).unwrap().unwrap();
+    assert_eq!(st.base_commit, c);
+    assert!(st.conflicts.is_empty() && st.pending_head.is_none());
+    assert_eq!(
+        local_changes(d.path()).unwrap(),
+        vec![Change {
+            path: "main.slint".into(),
+            kind: ChangeKind::Modified
+        }]
+    );
+    let r = push(&f, d.path(), "mine wins").unwrap();
+    assert_eq!(f.parent(&r.commit), Some(c));
+    let l = f.listing("main");
+    assert_eq!(l["ui/main.slint"], b"mine\n");
+    assert_eq!(l["ui/sub/deep.slint"], b"d2\n");
+}
+
+#[test]
+fn mixed_keep_local_and_take_remote() {
+    let f = seeded();
+    let d = cloned(&f);
+    write(d.path(), "main.slint", b"mine\n");
+    write(d.path(), "sub/deep.slint", b"mine deep\n");
+    let c = f.commit(
+        "main",
+        &[
+            ("ui/main.slint", Some(b"t1\n")),
+            ("ui/sub/deep.slint", Some(b"t2\n")),
+        ],
+    );
+    let r = pull(&f, d.path()).unwrap();
+    assert_eq!(r.conflicts.len(), 2);
+    keep_local(&f, d.path(), "main.slint").unwrap();
+    assert!(matches!(
+        push(&f, d.path(), "m"),
+        Err(SyncError::ConflictsPending)
+    ));
+    assert_eq!(
+        SyncState::load(d.path()).unwrap().unwrap().conflicts,
+        vec!["sub/deep.slint"]
+    );
+    take_remote(&f, d.path(), "sub/deep.slint").unwrap();
+    assert_eq!(SyncState::load(d.path()).unwrap().unwrap().base_commit, c);
+    assert_eq!(read(d.path(), "sub/deep.slint"), b"t2\n");
+    assert_eq!(read(d.path(), "sub/deep.slint.local"), b"mine deep\n");
+    let r = push(&f, d.path(), "m").unwrap();
+    assert_eq!((r.added, r.modified, r.deleted), (0, 1, 0));
+    let l = f.listing("main");
+    assert_eq!(l["ui/main.slint"], b"mine\n");
+    assert_eq!(l["ui/sub/deep.slint"], b"t2\n");
+}
+
+#[test]
+fn take_remote_keeps_an_existing_local_copy() {
+    let f = seeded();
+    let d = cloned(&f);
+    write(d.path(), "main.slint", b"mine\n");
+    write(d.path(), "main.slint.local", b"older keep\n");
+    f.commit("main", &[("ui/main.slint", Some(b"theirs\n"))]);
+    pull(&f, d.path()).unwrap();
+    take_remote(&f, d.path(), "main.slint").unwrap();
+    assert_eq!(read(d.path(), "main.slint.local"), b"older keep\n");
+    assert_eq!(read(d.path(), "main.slint.local.2"), b"mine\n");
+    assert!(local_changes(d.path()).unwrap().is_empty());
+}
+
+#[test]
+fn hostile_remote_entries_are_skipped() {
+    let hostile: &[(&str, &str)] = &[
+        ("../x", "100644"),
+        ("/abs", "100644"),
+        ("a/../../b", "100644"),
+        ("a\\b", "100644"),
+        ("link", "120000"),
+        ("submod", "160000"),
+        ("ok/fine.txt", "100644"),
+    ];
+    for folder in ["ui", ""] {
+        let f = seeded();
+        let prefix = if folder.is_empty() {
+            String::new()
+        } else {
+            format!("{folder}/")
+        };
+        let paths: Vec<String> = hostile
+            .iter()
+            .map(|(p, _)| format!("{prefix}{p}"))
+            .collect();
+        let changes: Vec<(&str, Option<&[u8]>, &str)> = paths
+            .iter()
+            .zip(hostile)
+            .map(|(p, (_, m))| (p.as_str(), Some(&b"evil"[..]), *m))
+            .collect();
+        f.commit_modes("main", &changes);
+        let parent = tempfile::tempdir().unwrap();
+        let before = snapshot(parent.path());
+        let proj = parent.path().join("proj");
+        let st = clone_into(&f, REPO, "main", folder, &proj).unwrap();
+        let mut got: Vec<&str> = st.files.keys().map(String::as_str).collect();
+        got.sort();
+        assert!(got.contains(&"ok/fine.txt"));
+        for bad in ["../x", "/abs", "a/../../b", "a\\b", "link", "submod"] {
+            assert!(!got.contains(&bad), "{bad} imported (folder {folder:?})");
+        }
+        let _ = before;
+        let all = snapshot(parent.path());
+        assert!(
+            all.keys().all(|k| k.starts_with("proj/")),
+            "{:?}",
+            all.keys().collect::<Vec<_>>()
+        );
+        assert!(!proj.join("link").exists() && !proj.join("submod").exists());
+
+        // pull path: hostile entries arrive in a later commit
+        let f2 = seeded();
+        let proj2 = parent.path().join("proj2");
+        clone_into(&f2, REPO, "main", folder, &proj2).unwrap();
+        f2.commit_modes("main", &changes);
+        pull(&f2, &proj2).unwrap();
+        let all = snapshot(parent.path());
+        assert!(
+            all.keys()
+                .all(|k| k.starts_with("proj/") || k.starts_with("proj2/"))
+        );
+        assert!(!proj2.join("link").exists() && !proj2.join("submod").exists());
+        assert_eq!(read(&proj2, "ok/fine.txt"), b"evil");
+    }
+}
+
+#[test]
+fn pull_when_folder_is_gone_deletes_nothing() {
+    let f = seeded();
+    let d = cloned(&f);
+    f.commit(
+        "main",
+        &[
+            ("ui/main.slint", None),
+            ("ui/sub/deep.slint", None),
+            ("ui/img/pic.bin", None),
+            ("ui/.settings", None),
+            ("ui/old.bak", None),
+        ],
+    );
+    let snap = snapshot(d.path());
+    assert!(matches!(pull(&f, d.path()), Err(SyncError::EmptyFolder)));
+    assert_eq!(snapshot(d.path()), snap);
 }

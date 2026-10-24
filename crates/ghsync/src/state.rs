@@ -95,7 +95,20 @@ pub fn is_managed(rel: &str) -> bool {
         ".sync" | ".preview" | ".settings" | ".last-open" | ".github-token"
     ) || name.starts_with(".ghsync-tmp")
         || name.ends_with(".bak")
-        || name.ends_with(".local")
+        || is_local_copy(name)
+}
+
+/// `x.local`, or `x.local.2`, `x.local.3` ... (kept copies of local versions).
+fn is_local_copy(name: &str) -> bool {
+    if name.ends_with(".local") {
+        return true;
+    }
+    match name.rsplit_once('.') {
+        Some((rest, n)) => {
+            !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && rest.ends_with(".local")
+        }
+        None => false,
+    }
 }
 
 /// A relative path is safe if it has only normal components.

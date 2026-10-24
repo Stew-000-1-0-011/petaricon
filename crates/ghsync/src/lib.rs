@@ -10,6 +10,6 @@ pub mod sync;
 pub use api::{ApiError, GitHubApi, HttpApi, NewEntry, TreeEntry, UpdateError};
 pub use state::{FileEntry, SyncState, git_blob_sha, is_managed};
 pub use sync::{
-    Change, ChangeKind, PullReport, PushReport, SyncError, clone_into, local_changes, pull, push,
-    take_remote,
+    Change, ChangeKind, PullReport, PushReport, SyncError, clone_into, keep_local, local_changes,
+    pull, push, take_remote,
 };
