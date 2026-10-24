@@ -81,33 +81,40 @@ fn suffix_when_the_default_is_taken() {
 #[test]
 fn refusals_say_why_and_change_nothing() {
     let mut s = session();
+    let before = s.doc().text().to_string();
     select(&mut s, &[0]);
     // No value.
     let e = s.can_parameterize("opacity").unwrap_err();
     assert!(e.contains("値"), "{e}");
     assert!(s.parameterize("opacity", "o", None).is_err());
+    assert_eq!(s.doc().text(), before);
     // self / parent.
     select(&mut s, &[2]);
     assert!(s.can_parameterize("width").unwrap_err().contains("self"));
     assert!(s.can_parameterize("text").unwrap_err().contains("self"));
+    assert!(s.parameterize("text", "t", None).is_err());
+    assert_eq!(s.doc().text(), before);
     // Unknown type.
     select(&mut s, &[3]);
     assert_eq!(s.can_parameterize("clip").unwrap().1, None);
     let r = s.parameterize("clip", "r", None);
     assert!(matches!(r, Err(SessionError::Rejected(_))), "{r:?}");
-    // ... chosen by the user it works (int).
-    s.parameterize("clip", "r", Some("bool")).unwrap();
-    assert!(s.doc().text().contains("in property <bool> r: true;"));
+    assert_eq!(s.doc().text(), before);
     // Bad type / name.
     select(&mut s, &[0]);
     assert!(s.parameterize("text", "x", Some("nope")).is_err());
     assert!(s.parameterize("text", "a b", None).is_err());
+    assert!(s.parameterize("text", "width", None).is_err());
+    assert_eq!(s.doc().text(), before);
     // No selection.
     let mut n = session();
     assert!(n.can_parameterize("text").is_err());
     assert!(n.parameterize("text", "t", None).is_err());
-    // Nothing above (but the one success) touched the text.
     assert_eq!(n.doc().text(), SRC);
+    // The type, when the user chooses one, is used.
+    select(&mut s, &[3]);
+    s.parameterize("clip", "r", Some("bool")).unwrap();
+    assert!(s.doc().text().contains("in property <bool> r: true;"));
 }
 
 #[test]

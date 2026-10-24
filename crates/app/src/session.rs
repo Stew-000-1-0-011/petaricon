@@ -1085,11 +1085,10 @@ impl Session {
             Some(id) => id.clone(),
             None => info.type_name.rsplit('.').next().unwrap_or("").to_lowercase(),
         };
-        let taken = self.doc.declared_names(&path.component);
         let first = format!("{base}-{property}");
         let mut name = first.clone();
         let mut n = 2;
-        while taken.contains(&name) {
+        while self.doc.parameter_name_taken(&path.component, &name) {
             name = format!("{first}-{n}");
             n += 1;
         }

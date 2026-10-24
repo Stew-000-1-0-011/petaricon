@@ -663,8 +663,19 @@ fn add_declaration(
     component: &str,
     decl: &str,
 ) -> Result<TextEdit, EditError> {
+    add_declaration_in(text, root, component, decl, false)
+}
+
+/// `add_declaration`; `multiline` allows continuation lines (copied as written).
+fn add_declaration_in(
+    text: &str,
+    root: &SyntaxNode,
+    component: &str,
+    decl: &str,
+    multiline: bool,
+) -> Result<TextEdit, EditError> {
     let decl = decl.trim();
-    if decl.is_empty() || decl.contains('\n') {
+    if decl.is_empty() || (!multiline && decl.contains('\n')) {
         return Err(EditError::InvalidTarget(
             "宣言は空でない1行にしてください".into(),
         ));
@@ -703,13 +714,15 @@ fn add_declaration(
     if rest.is_empty() || rest.starts_with("//") {
         // Own line: after any same-line comment, on a new line.
         let mut end = le;
+        let mut eol = "\n";
         if end > at && text.as_bytes()[end - 1] == b'\r' {
             end -= 1;
+            eol = "\r\n";
         }
         Ok(TextEdit {
             start: end,
             end,
-            text: format!("\n{indent}{decl}"),
+            text: format!("{eol}{indent}{decl}"),
         })
     } else {
         Ok(TextEdit {
@@ -748,6 +761,38 @@ fn declared_names(root: &SyntaxNode, component: &str) -> Vec<String> {
         .collect()
 }
 
+/// Property names every element has (or the usual ones), which a parameter must not shadow.
+const BUILTIN_PROPS: &[&str] = &[
+    "x", "y", "z", "width", "height", "min-width", "min-height", "max-width", "max-height",
+    "preferred-width", "preferred-height", "horizontal-stretch", "vertical-stretch", "opacity",
+    "visible", "enabled", "clip", "text", "color", "background", "source", "font-size",
+    "font-weight", "font-family", "border-radius", "border-width", "border-color", "spacing",
+    "padding", "padding-left", "padding-right", "padding-top", "padding-bottom", "alignment",
+    "cross-axis-alignment", "layout-cache", "has-focus", "checked", "value",
+];
+
+/// `_` and `-` are the same character in a Slint name.
+fn normalize_name(n: &str) -> String {
+    n.replace('_', "-")
+}
+
+/// Whether `name` is declared on the root of `component`, is a property written on it, or is
+/// a builtin property name (all compared with `_` = `-`).
+fn name_taken(root: &SyntaxNode, component: &str, name: &str) -> bool {
+    let n = normalize_name(name);
+    let bindings = syntax::component_node(root, component)
+        .and_then(|c| syntax::component_element(&c))
+        .into_iter()
+        .flat_map(|e| e.children())
+        .filter(|b| matches!(b.kind(), SyntaxKind::Binding | SyntaxKind::TwoWayBinding))
+        .filter_map(|b| b.child_text(SyntaxKind::Identifier).map(|i| i.to_string()));
+    declared_names(root, component)
+        .into_iter()
+        .chain(bindings)
+        .any(|d| normalize_name(&d) == n)
+        || BUILTIN_PROPS.contains(&n.as_str())
+}
+
 /// The expression of `property` on the element at `path` if it can become a parameter, else
 /// the reason (short Japanese text) it cannot.
 fn parameter_source(
@@ -757,6 +802,24 @@ fn parameter_source(
 ) -> Result<(SyntaxNode, String), EditError> {
     let (_, element) = resolve_in(root, path)?;
     let refuse = |m: &str| Err(EditError::InvalidTarget(m.to_string()));
+    let named = |n: &SyntaxNode, kind: SyntaxKind| {
+        n.kind() == SyntaxKind::PropertyDeclaration
+            && n.child_node(kind)
+                .is_some_and(|d| d.text().to_string().trim() == property)
+    };
+    if element
+        .children()
+        .any(|n| named(&n, SyntaxKind::DeclaredIdentifier))
+    {
+        return refuse("要素で宣言したプロパティは引数にできません");
+    }
+    if element.children().any(|n| {
+        n.kind() == SyntaxKind::TwoWayBinding
+            && n.child_text(SyntaxKind::Identifier)
+                .is_some_and(|i| i == property)
+    }) {
+        return refuse("双方向バインディングは引数にできません");
+    }
     let Some(binding) = find_binding(&element, property) else {
         return refuse("先に値を入れてください");
     };
@@ -803,16 +866,17 @@ fn parameterize(
         return Err(EditError::InvalidTarget(format!("`{ty}` は使えない型です")));
     }
     let (expr_node, expr) = parameter_source(root, path, property)?;
-    if declared_names(root, &path.component).iter().any(|n| n == name) {
+    if name_taken(root, &path.component, name) {
         return Err(EditError::InvalidTarget(format!(
             "`{name}` はすでに宣言されています"
         )));
     }
-    let decl = add_declaration(
+    let decl = add_declaration_in(
         text,
         root,
         &path.component,
         &format!("in property <{ty}> {name}: {expr};"),
+        true,
     )?;
     let (start, end) = range(&expr_node);
     Ok(vec![
@@ -830,6 +894,11 @@ impl Document {
     /// default, or why it cannot become one.
     pub fn parameter_source(&self, path: &ElementPath, property: &str) -> Result<String, EditError> {
         parameter_source(&self.parse(), path, property).map(|(_, e)| e)
+    }
+
+    /// Whether a parameter `name` would clash on the root of `component`.
+    pub fn parameter_name_taken(&self, component: &str, name: &str) -> bool {
+        name_taken(&self.parse(), component, name)
     }
 
     /// Properties and callbacks declared on the root element of `component`.
