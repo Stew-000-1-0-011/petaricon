@@ -19,9 +19,12 @@ struct Shared {
     fake: Arc<Fake>,
     fail: Arc<std::sync::Mutex<Option<ApiError>>>,
     tokens: Arc<std::sync::Mutex<Vec<String>>>,
+    poison: Poison,
 }
 
-struct Api(Arc<Fake>, Arc<std::sync::Mutex<Option<ApiError>>>);
+type Poison = Arc<std::sync::Mutex<Option<std::path::PathBuf>>>;
+
+struct Api(Arc<Fake>, Arc<std::sync::Mutex<Option<ApiError>>>, Poison);
 
 impl Api {
     fn check(&self) -> Result<(), ApiError> {
@@ -47,6 +50,12 @@ impl GitHubApi for Api {
         self.0.tree_recursive(r, t)
     }
     fn blob(&self, r: &str, s: &str) -> Result<Vec<u8>, ApiError> {
+        if let Some(dir) = self.2.lock().unwrap().clone() {
+            // Leave a half-made project behind, then die.
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("partial.txt"), "x").unwrap();
+            panic!("worker died");
+        }
         self.0.blob(r, s)
     }
     fn create_blob(&self, r: &str, b: &[u8]) -> Result<String, ApiError> {
@@ -108,11 +117,13 @@ fn setup(token: Option<&str>) -> Env {
         fake: Arc::new(remote()),
         fail: Arc::new(std::sync::Mutex::new(None)),
         tokens: Arc::new(std::sync::Mutex::new(Vec::new())),
+        poison: Arc::new(std::sync::Mutex::new(None)),
     };
-    let (fake, fail, tokens) = (shared.fake.clone(), shared.fail.clone(), shared.tokens.clone());
+    let (fake, fail, tokens, poison) =
+        (shared.fake.clone(), shared.fail.clone(), shared.tokens.clone(), shared.poison.clone());
     let factory: ApiFactory = Arc::new(move |token: &str| -> BoxApi {
         tokens.lock().unwrap().push(token.to_string());
-        Box::new(Api(fake.clone(), fail.clone()))
+        Box::new(Api(fake.clone(), fail.clone(), poison.clone()))
     });
     let editor = app::Editor::new().unwrap();
     app::glue::start_with(&editor, Box::new(store), factory).unwrap();
@@ -588,4 +599,70 @@ fn hiding_the_keyboard_keeps_what_was_typed() {
     elapse(400);
     assert_eq!(e.get_gh_token_hint().as_str(), "…abcd");
     assert_eq!(e.get_bar_text().as_str(), "");
+}
+
+#[test]
+fn edits_made_while_a_pull_runs_are_kept_as_a_local_copy_not_lost() {
+    let env = setup(Some(TOKEN));
+    let e = &env.editor;
+    linked(&env);
+    e.invoke_gh_open();
+    env.fake().commit("dev", &[("crates/ui/main.slint", Some(SRC2.as_bytes()))]);
+    e.invoke_gh_pull();
+    assert!(e.get_gh_busy());
+    make_dirty(e); // typed while the transfer runs
+    wait(e);
+    assert!(e.get_gh_error().contains("main.slint.local"), "{}", e.get_gh_error());
+    // The fetched version is open and clean, the edits are in the .local copy.
+    assert_eq!(strings(e.get_components()), vec!["Main", "Extra"]);
+    assert!(!e.get_dirty());
+    let kept = std::fs::read_to_string(env.root().join("ui/main.slint.local")).unwrap();
+    assert_ne!(kept, SRC, "the dragged box is in the kept copy");
+    assert!(kept.contains("component Main") && !kept.contains("Extra"));
+    // Saving now cannot replace the remote change with the edits, and nothing is a silent
+    // local change: the push has nothing to send.
+    e.invoke_gh_push("m".into());
+    wait(e);
+    assert!(e.get_gh_error().contains("送る変更がありません"), "{}", e.get_gh_error());
+}
+
+#[test]
+fn a_result_after_switching_projects_does_not_touch_the_new_one() {
+    let env = setup(Some(TOKEN));
+    let e = &env.editor;
+    linked(&env);
+    let default_components = {
+        e.invoke_open("default".into(), "main.slint".into());
+        strings(e.get_components())
+    };
+    e.invoke_open("ui".into(), "main.slint".into());
+    e.invoke_gh_open();
+    env.fake().commit("dev", &[("crates/ui/main.slint", Some(SRC2.as_bytes()))]);
+    e.invoke_gh_pull();
+    assert!(e.get_gh_busy());
+    e.invoke_open("default".into(), "main.slint".into());
+    wait(e);
+    assert_eq!(e.get_current_project().as_str(), "default");
+    assert_eq!(strings(e.get_components()), default_components, "no reload into the new project");
+    assert!(!e.get_dirty());
+    // The pull itself still landed in the project it was for.
+    let ui = std::fs::read_to_string(env.root().join("ui/main.slint")).unwrap();
+    assert_eq!(ui, SRC2);
+}
+
+#[test]
+fn a_worker_that_dies_mid_clone_leaves_no_new_folder_but_keeps_an_old_one() {
+    let env = setup(Some(TOKEN));
+    let e = &env.editor;
+    *env.shared.poison.lock().unwrap() = Some(env.root().join("ui"));
+    import(&env, "ui");
+    wait(e);
+    assert!(e.get_gh_error().contains("途中で止まりました"), "{}", e.get_gh_error());
+    assert!(!env.root().join("ui").exists(), "the half-made folder is removed");
+    assert_eq!(strings(e.get_projects()), vec!["default"]);
+    // A folder that was already there (empty) is not the job's to delete.
+    std::fs::create_dir(env.root().join("ui")).unwrap();
+    import(&env, "ui");
+    wait(e);
+    assert!(env.root().join("ui").is_dir());
 }

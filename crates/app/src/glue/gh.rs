@@ -19,6 +19,9 @@ const POLL: Duration = Duration::from_millis(50);
 /// A job in flight.
 pub(super) struct Running {
     rx: Receiver<Outcome>,
+    /// The project folder, and whether this clone job is the one that created it.
+    dir: std::path::PathBuf,
+    created: bool,
     /// The project the job works on (the open one, or the one being created).
     project: String,
     /// For redacting texts only.
@@ -126,17 +129,18 @@ impl Glue {
             let e = self.editor().get_error_text().to_string();
             return self.gh_error(&e);
         }
+        let created = matches!(job, Job::Clone { .. }) && !dir.exists();
         let (tx, rx) = mpsc::channel();
         let factory: ApiFactory = self.api.clone();
-        let (job2, token2) = (job.clone(), token.clone());
+        let (job2, token2, dir2) = (job.clone(), token.clone(), dir.clone());
         let spawned = std::thread::Builder::new().name("github".into()).spawn(move || {
             let api = factory(&token2);
-            let _ = tx.send(github::run(&*api, &dir, &job2));
+            let _ = tx.send(github::run(&*api, &dir2, &job2));
         });
         if let Err(e) = spawned {
             return self.gh_error(&format!("通信を始められませんでした: {e}"));
         }
-        self.gh_job = Some(Running { rx, project: project.to_string(), token });
+        self.gh_job = Some(Running { rx, dir, created, project: project.to_string(), token });
         let ed = self.editor();
         ed.set_gh_busy(true);
         ed.set_gh_error("".into());
@@ -247,6 +251,35 @@ impl Glue {
         }
     }
 
+    fn reload_open_file(&mut self) {
+        self.discard_source_edits();
+        let (p, f) = (self.project.clone(), self.file.clone());
+        match Glue::load(&*self.store, &self.me, &p, &f) {
+            Ok(session) => {
+                self.nav.clear();
+                self.show_loaded(&p, &f, session);
+            }
+            Err(e) => self.set_error(&e),
+        }
+    }
+
+    /// Writes the editor text to the first free `<file>.local[.N]`; returns that name.
+    fn keep_edits_as_local(&self) -> Result<String, String> {
+        let path = self
+            .store
+            .location(&self.project, &self.file)
+            .ok_or_else(|| "保存先にファイルがありません".to_string())?;
+        let mut name = format!("{}.local", self.file);
+        let mut n = 2;
+        while path.with_file_name(&name).exists() {
+            name = format!("{}.local.{n}", self.file);
+            n += 1;
+        }
+        std::fs::write(path.with_file_name(&name), self.session.doc().text())
+            .map_err(|e| e.to_string())?;
+        Ok(name)
+    }
+
     /// Files of `project` changed on disk: re-reads the open document when it is one of them
     /// (its undo history is cleared only when its text changed) and rebuilds the preview.
     fn gh_reload(&mut self, project: &str, changed: &[String]) {
@@ -263,24 +296,23 @@ impl Glue {
         match self.store.read(&self.project, &self.file) {
             Ok(text) if text == self.session.doc().text() => self.rebuild(),
             Ok(_) if self.session.doc().is_dirty() => {
-                // Edits made while the transfer ran: keep them (saving them replaces the
-                // fetched version, so say so).
-                self.gh_error(&format!(
-                    "{} は取り込んだ内容と、未保存の編集の両方があります。エディタの内容を残しました(保存すると取り込んだ内容は上書きされます)",
-                    self.file
-                ));
-            }
-            Ok(_) => {
-                self.discard_source_edits();
-                let (p, f) = (self.project.clone(), self.file.clone());
-                match Glue::load(&*self.store, &self.me, &p, &f) {
-                    Ok(session) => {
-                        self.nav.clear();
-                        self.show_loaded(&p, &f, session);
-                    }
-                    Err(e) => self.set_error(&e),
+                // Edited while the transfer ran. The fetched version is now the synced one,
+                // so a later save of these edits would silently replace it: keep the edits
+                // as `<file>.local` (like 「リモートの版にする」) and show the fetched version.
+                let kept = self.keep_edits_as_local();
+                self.reload_open_file();
+                match kept {
+                    Ok(name) => self.gh_error(&format!(
+                        "{} は取り込んだ内容と、取り込み中の未保存の編集の両方がありました。編集内容は「{name}」に残して、取り込んだ版を開きました",
+                        self.file
+                    )),
+                    Err(e) => self.gh_error(&format!(
+                        "{} の未保存の編集を残せなかったので、エディタの内容を残しました(保存すると取り込んだ内容は上書きされます): {e}",
+                        self.file
+                    )),
                 }
             }
+            Ok(_) => self.reload_open_file(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // The file was deleted on GitHub: switch to another one of the project.
                 let p = self.project.clone();
@@ -315,6 +347,10 @@ fn poll(me: Weak<RefCell<Glue>>) {
         Err(TryRecvError::Empty) => g.gh_job = Some(run),
         Err(TryRecvError::Disconnected) => {
             g.gh_timer.stop();
+            if run.created {
+                // The worker died mid-clone: remove what it may have left (it made the folder).
+                let _ = std::fs::remove_dir_all(&run.dir);
+            }
             g.editor().set_gh_busy(false);
             g.gh_error("通信の処理が途中で止まりました。もう一度お試しください");
         }

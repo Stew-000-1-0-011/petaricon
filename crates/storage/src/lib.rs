@@ -248,6 +248,8 @@ pub trait ProjectStore {
 
 pub struct LocalStore {
     root: PathBuf,
+    /// Where `.github-token` lives (the root unless a private directory was given).
+    token_dir: PathBuf,
 }
 
 /// The rule every project and file name must pass.
@@ -269,7 +271,30 @@ pub fn check_name(name: &str) -> io::Result<()> {
 impl LocalStore {
     pub fn new(root: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        Ok(Self { token_dir: root.clone(), root })
+    }
+
+    /// Like `new`, but the GitHub token is kept in `private` (e.g. Android's internal data
+    /// directory, which a USB-connected PC cannot see). A token file left in `root` by an
+    /// older version is moved there once, and the old copy removed.
+    pub fn with_private_dir(root: PathBuf, private: PathBuf) -> io::Result<Self> {
+        fs::create_dir_all(&root)?;
+        fs::create_dir_all(&private)?;
+        let store = Self { root, token_dir: private };
+        store.migrate_token()?;
+        Ok(store)
+    }
+
+    fn migrate_token(&self) -> io::Result<()> {
+        let old = self.root.join(GITHUB_TOKEN);
+        if self.token_dir == self.root {
+            return Ok(());
+        }
+        let Ok(text) = fs::read_to_string(&old) else { return Ok(()) };
+        if self.github_token().is_none() && !text.trim().is_empty() {
+            self.set_github_token(&text)?;
+        }
+        remove_if_exists(&old)
     }
 
     fn project_dir(&self, project: &str) -> io::Result<PathBuf> {
@@ -336,7 +361,7 @@ impl ProjectStore for LocalStore {
     }
 
     fn github_token(&self) -> Option<String> {
-        let text = fs::read_to_string(self.root.join(GITHUB_TOKEN)).ok()?;
+        let text = fs::read_to_string(self.token_dir.join(GITHUB_TOKEN)).ok()?;
         let t = text.trim();
         (!t.is_empty()).then(|| t.to_string())
     }
@@ -346,7 +371,7 @@ impl ProjectStore for LocalStore {
         if token.is_empty() || token.contains(|c: char| c.is_whitespace() || c.is_control()) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid token"));
         }
-        let tmp = self.root.join(".github-token.tmp");
+        let tmp = self.token_dir.join(".github-token.tmp");
         {
             use std::io::Write;
             let mut opts = fs::OpenOptions::new();
@@ -357,11 +382,11 @@ impl ProjectStore for LocalStore {
             f.write_all(token.as_bytes())?;
             f.write_all(b"\n")?;
         }
-        fs::rename(&tmp, self.root.join(GITHUB_TOKEN))
+        fs::rename(&tmp, self.token_dir.join(GITHUB_TOKEN))
     }
 
     fn clear_github_token(&self) -> io::Result<()> {
-        remove_if_exists(&self.root.join(GITHUB_TOKEN))
+        remove_if_exists(&self.token_dir.join(GITHUB_TOKEN))
     }
 
     fn projects(&self) -> io::Result<Vec<String>> {
@@ -761,6 +786,37 @@ mod tests {
         assert_eq!(s.github_token(), None);
         s.clear_github_token().unwrap();
         assert!(s.projects().unwrap().is_empty(), "the token file is not a project");
+    }
+
+    #[test]
+    fn token_lives_in_the_private_dir_when_one_is_given() {
+        let d = tempfile::tempdir().unwrap();
+        let (root, private) = (d.path().join("projects"), d.path().join("private"));
+        let s = LocalStore::with_private_dir(root.clone(), private.clone()).unwrap();
+        s.set_github_token("ghp_privatetoken").unwrap();
+        assert!(private.join(".github-token").is_file());
+        assert!(!root.join(".github-token").exists());
+        assert_eq!(s.github_token().as_deref(), Some("ghp_privatetoken"));
+        s.clear_github_token().unwrap();
+        assert!(!private.join(".github-token").exists());
+        assert_eq!(s.github_token(), None);
+    }
+
+    #[test]
+    fn an_old_token_in_the_projects_dir_is_moved_once() {
+        let d = tempfile::tempdir().unwrap();
+        let (root, private) = (d.path().join("projects"), d.path().join("private"));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".github-token"), "ghp_oldtoken\n").unwrap();
+        let s = LocalStore::with_private_dir(root.clone(), private.clone()).unwrap();
+        assert_eq!(s.github_token().as_deref(), Some("ghp_oldtoken"));
+        assert!(!root.join(".github-token").exists(), "old copy deleted");
+        assert!(private.join(".github-token").is_file());
+        // A token already in the private dir wins; a stray old file is still removed.
+        fs::write(root.join(".github-token"), "ghp_stale\n").unwrap();
+        let s = LocalStore::with_private_dir(root.clone(), private).unwrap();
+        assert_eq!(s.github_token().as_deref(), Some("ghp_oldtoken"));
+        assert!(!root.join(".github-token").exists());
     }
 
     #[test]

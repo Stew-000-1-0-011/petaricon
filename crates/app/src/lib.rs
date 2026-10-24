@@ -28,6 +28,8 @@ fn android_main(app: slint::android::AndroidApp) {
     use slint::android::android_activity::{MainEvent, PollEvent};
 
     let base = app.external_data_path().expect("no external data path");
+    // The GitHub token goes to private storage; `base` is visible over USB.
+    let private = app.internal_data_path().expect("no internal data path");
     // Before the Slint backend starts, so its font collection sees the variable.
     match app.internal_data_path() {
         Some(dir) => font::install(&dir.join("fonts")),
@@ -39,6 +41,7 @@ fn android_main(app: slint::android::AndroidApp) {
         }
     })
     .unwrap();
-    let store = storage::LocalStore::new(base.join("projects")).expect("projects dir");
+    let store = storage::LocalStore::with_private_dir(base.join("projects"), private)
+        .expect("projects dir");
     run(Box::new(store), base.join("logs")).unwrap();
 }
