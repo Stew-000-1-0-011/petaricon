@@ -1060,8 +1060,8 @@ impl Glue {
                     return;
                 }
             }
-        } else if !self.session.set_preview_value(&p.name, &p.value) {
-            self.set_error(&format!("{} は in / in-out プロパティではありません", p.name));
+        } else if let Err(e) = self.session.set_preview_value(&p.name, &p.value) {
+            self.set_error(&e.to_string());
             return;
         }
         self.preview_changed(refresh);
@@ -1084,8 +1084,9 @@ impl Glue {
         if self.edit_refused() {
             return;
         }
-        if self.session.set_preview_value(name, value) {
-            self.preview_changed(true);
+        match self.session.set_preview_value(name, value) {
+            Ok(()) => self.preview_changed(true),
+            Err(e) => self.set_error(&e.to_string()),
         }
     }
 

@@ -42,6 +42,8 @@ pub enum SessionError {
     /// An edit that would leave the document broken; nothing was changed.
     #[error("この値は使えません: {0}")]
     Rejected(String),
+    #[error("{0} は in / in-out プロパティではありません")]
+    NotPreviewProp(String),
     #[error("表示後にソースが変わりました。ソースタブを開き直してください")]
     StaleSource,
 }
@@ -183,8 +185,9 @@ pub struct PreviewProp {
     pub name: String,
     pub ty: String,
     pub kind: PreviewKind,
-    /// What the field shows: the Slint expression, except that a plain string literal is
-    /// shown without its quotes. Empty when no value is set.
+    /// What the field shows: for a string, a plain literal as the text itself and any other
+    /// expression as `=` and the expression (see `field_text`); otherwise the Slint
+    /// expression. Empty when no value is set.
     pub shown: String,
     /// Why the value was left out of the last build; empty when it applies.
     pub error: String,
@@ -251,15 +254,26 @@ fn unquote(expr: &str) -> Option<String> {
     Some(out)
 }
 
-fn preview_expr(kind: PreviewKind, input: &str) -> String {
+/// The Slint expression a preview field input stands for (the `.preview` file keeps the
+/// expression, so old files keep working). `string` follows the Props `text` rule (`normalise`);
+/// a raw value takes an optional leading `=`; the other kinds keep their input. Empty clears.
+fn preview_expr(kind: PreviewKind, input: &str) -> Result<String, String> {
     let v = input.trim();
-    match kind {
-        PreviewKind::Length if is_bare_number(v) => format!("{v}px"),
-        PreviewKind::Text if !v.is_empty() && !v.starts_with('"') => {
-            format!("\"{}\"", input.replace('\\', "\\\\").replace('"', "\\\""))
-        }
-        _ => v.to_string(),
+    if v.is_empty() {
+        return Ok(String::new());
     }
+    Ok(match kind {
+        PreviewKind::Length if is_bare_number(v) => format!("{v}px"),
+        PreviewKind::Text => normalise(PropKind::Text, input)?,
+        PreviewKind::Raw => match v.strip_prefix('=') {
+            Some(rest) if rest.trim().is_empty() => {
+                return Err("= のあとに式を書いてください".into());
+            }
+            Some(rest) => rest.trim().to_string(),
+            None => v.to_string(),
+        },
+        _ => v.to_string(),
+    })
 }
 
 /// One row of the element tree, in depth-first display order.
@@ -515,7 +529,7 @@ impl Session {
                 let kind = PreviewKind::of(&ty);
                 let expr = p.value(&name).unwrap_or_default();
                 let shown = if kind == PreviewKind::Text {
-                    unquote(expr).unwrap_or_else(|| expr.to_string())
+                    field_text(PropKind::Text, expr)
                 } else {
                     expr.to_string()
                 };
@@ -543,15 +557,15 @@ impl Session {
     }
 
     /// Sets (an empty input removes) the preview value of a property of the current
-    /// component; `rebuild` applies it. Returns false when it is not an `in` / `in-out`
-    /// property.
-    pub fn set_preview_value(&mut self, name: &str, input: &str) -> bool {
+    /// component; `rebuild` applies it. `NotPreviewProp` when it is not an `in` / `in-out`
+    /// property, `Rejected` (nothing changed) for a lone `=`.
+    pub fn set_preview_value(&mut self, name: &str, input: &str) -> Result<(), SessionError> {
         let Some(prop) = self.preview_props().into_iter().find(|p| p.name == name) else {
-            return false;
+            return Err(SessionError::NotPreviewProp(name.to_string()));
         };
-        let expr = preview_expr(prop.kind, input);
+        let expr = preview_expr(prop.kind, input).map_err(SessionError::Rejected)?;
         self.previews.entry(self.component.clone()).or_default().set_value(name, &expr);
-        true
+        Ok(())
     }
 
     pub fn doc(&self) -> &Document {
