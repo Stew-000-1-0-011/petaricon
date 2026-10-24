@@ -263,8 +263,8 @@ pub struct Glue {
     recovered: Option<(String, String, String)>,
     /// Name of the component just extracted; declarations are added to it.
     extracted: String,
-    /// The property the 引数にする dialog is about.
-    param_prop: String,
+    /// What the 引数にする dialog is about.
+    param_target: Option<ParamTarget>,
     guide_target: RefCell<Option<slint_doc::ElementPath>>,
     /// Tolerance of Tidy in px.
     tolerance: i32,
@@ -292,6 +292,14 @@ struct PendingPreview {
 
 /// Panel rows whose name starts with this are preview fields, not element properties.
 const PREVIEW_FIELD: char = '@';
+
+/// What the 引数にする dialog was opened for: the document (and its text then) and the element.
+struct ParamTarget {
+    doc: (String, String),
+    text: String,
+    path: slint_doc::ElementPath,
+    property: String,
+}
 
 /// A property edit with the element and document it was typed for.
 struct PendingProp {
@@ -1459,7 +1467,13 @@ impl Glue {
         }
         match self.session.can_parameterize(property) {
             Ok((name, ty)) => {
-                self.param_prop = property.to_string();
+                let path = self.session.selection().cloned();
+                self.param_target = path.map(|path| ParamTarget {
+                    doc: (self.project.clone(), self.file.clone()),
+                    text: self.session.doc().text().to_string(),
+                    path,
+                    property: property.to_string(),
+                });
                 let ed = self.editor();
                 ed.set_param_name(name.into());
                 ed.set_param_subject(format!("{property} の値を、この部品の引数にします").into());
@@ -1482,7 +1496,21 @@ impl Glue {
             self.editor().set_dialog_error(LOCKED_TEXT.into());
             return;
         }
-        let property = self.param_prop.clone();
+        let Some(target) = self.param_target.take() else {
+            self.editor().set_param_open(false);
+            return;
+        };
+        if target.doc != (self.project.clone(), self.file.clone())
+            || self.session.selection() != Some(&target.path)
+            || self.session.doc().text() != target.text
+        {
+            let ed = self.editor();
+            ed.set_param_open(false);
+            ed.set_dialog_error("".into());
+            self.set_error("選択か文書が変わったため、引数にしませんでした");
+            return;
+        }
+        let property = target.property.clone();
         match self.session.parameterize(&property, name, (!ty.is_empty()).then_some(ty)) {
             Ok(()) => {
                 self.discard_source_edits();
@@ -1492,7 +1520,10 @@ impl Glue {
                 ed.set_param_open(false);
                 self.toast(&format!("{name} を引数にしました"));
             }
-            Err(e) => self.editor().set_dialog_error(e.to_string().into()),
+            Err(e) => {
+                self.param_target = Some(target);
+                self.editor().set_dialog_error(e.to_string().into());
+            }
         }
     }
 
@@ -1702,7 +1733,7 @@ pub fn start_with(
             recovery_failed: false,
             recovered: None,
             extracted: String::new(),
-            param_prop: String::new(),
+            param_target: None,
             guide_target: RefCell::new(None),
             tolerance,
             tidy_report: None,

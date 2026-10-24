@@ -248,11 +248,15 @@ export component BottomPanel inherits Rectangle {
                     }
                     if p.can-param: Rectangle {
                         x: parent.width - 80px;
-                        y: 2px;
+                        y: 0px;
                         width: 74px;
-                        height: 40px;
-                        background: #33404d;
-                        border-radius: 4px;
+                        height: 44px;
+                        Rectangle {
+                            y: 2px;
+                            height: 40px;
+                            background: #33404d;
+                            border-radius: 4px;
+                        }
                         Text {
                             text: "引数にする";
                             color: #8fc7ff;

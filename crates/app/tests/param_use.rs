@@ -232,3 +232,28 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+#[test]
+fn a_use_lists_geometry_then_parameters_then_stray_bindings_without_duplicates() {
+    let dir = copy();
+    let src = "component Card inherits Rectangle {\n    in property <string> title: \"T\";\n    in property <int> count: 3;\n    Text { text: root.title; }\n}\nexport component Main inherits Rectangle {\n    width: 300px;\n    height: 300px;\n    Card { x: 5px; title: \"Given\"; opacity: 0.5; }\n}\n";
+    std::fs::write(dir.path().join("t.slint"), src).unwrap();
+    let mut s = load(dir.path(), "t.slint", "Main");
+    assert!(s.rebuild_standalone(300., 300.), "{:?}", s.diagnostics());
+    sel(&mut s, "Main", &[0]);
+    let rows = s.properties();
+    let got: Vec<(&str, &str, &str)> =
+        rows.iter().map(|r| (r.name.as_str(), r.ty.as_str(), r.expr.as_str())).collect();
+    assert_eq!(
+        got,
+        [
+            ("x", "", "5px"),
+            ("y", "", ""),
+            ("width", "", ""),
+            ("height", "", ""),
+            ("title", "string", "\"Given\""),
+            ("count", "int", ""),
+            ("opacity", "", "0.5"),
+        ]
+    );
+}
