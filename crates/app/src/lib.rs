@@ -4,6 +4,7 @@ pub mod github;
 pub mod glue;
 pub mod guides;
 pub mod layout_bridge;
+pub mod lockstore;
 pub mod nav;
 pub mod session;
 pub mod tidy_overlay;

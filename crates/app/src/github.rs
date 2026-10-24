@@ -219,6 +219,23 @@ pub fn view(dir: &Path) -> View {
     }
 }
 
+/// Like `view`, but without scanning the files: a transfer is writing them right now. Only
+/// the `.sync` (always replaced atomically) is read.
+pub fn view_busy(dir: &Path) -> View {
+    match SyncState::load(dir) {
+        Ok(Some(state)) => {
+            let folder = if state.folder.is_empty() { "(リポジトリの直下)" } else { &state.folder };
+            View {
+                linked: true,
+                link_text: format!("{} · {} · {}", state.repo, state.branch, folder),
+                status_text: "GitHub と通信中です。終わるとここに状態が出ます".into(),
+                conflicts: state.conflicts,
+            }
+        }
+        _ => View::default(),
+    }
+}
+
 /// What the user typed for a new project, checked before anything is sent.
 pub struct CloneInput {
     pub repo: String,

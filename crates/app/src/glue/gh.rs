@@ -13,6 +13,7 @@ use slint::{ModelRc, SharedString, VecModel};
 
 use super::Glue;
 use crate::github::{self, ApiFactory, Job, Outcome};
+use crate::lockstore::Lock;
 
 const POLL: Duration = Duration::from_millis(50);
 
@@ -26,6 +27,8 @@ pub(super) struct Running {
     project: String,
     /// For redacting texts only.
     token: String,
+    /// What the status chip says while it runs.
+    chip: &'static str,
 }
 
 fn to_models(items: &[String]) -> ModelRc<SharedString> {
@@ -49,14 +52,22 @@ impl Glue {
     pub(super) fn gh_refresh(&self) {
         let ed = self.editor();
         ed.set_gh_token_hint(self.store.github_token().map(|t| github::mask_token(&t)).unwrap_or_default().into());
+        // The files of a project under transfer are being written: do not scan them.
+        let busy_here = self.locked(&self.project);
         let view = github::project_dir(&*self.store, &self.project)
-            .map(|d| github::view(&d))
+            .map(|d| if busy_here { github::view_busy(&d) } else { github::view(&d) })
             .unwrap_or_default();
         ed.set_gh_linked(view.linked);
         ed.set_gh_link_text(view.link_text.into());
         ed.set_gh_status_text(view.status_text.into());
         ed.set_gh_conflicts(to_models(&view.conflicts));
         ed.set_gh_busy(self.gh_job.is_some());
+        let chip = match &self.gh_job {
+            Some(run) => format!("GitHub: {}", run.chip),
+            None if !view.conflicts.is_empty() => format!("GitHub: 競合 {} 件", view.conflicts.len()),
+            None => String::new(),
+        };
+        ed.set_gh_chip(chip.into());
     }
 
     pub(super) fn gh_open(&mut self) {
@@ -140,11 +151,24 @@ impl Glue {
         if let Err(e) = spawned {
             return self.gh_error(&format!("通信を始められませんでした: {e}"));
         }
-        self.gh_job = Some(Running { rx, dir, created, project: project.to_string(), token });
+        let chip = match &job {
+            Job::Clone { .. } | Job::Pull => "取り込み中…",
+            Job::Push { .. } => "送信中…",
+            Job::TakeRemote(_) | Job::KeepLocal(_) => "反映中…",
+        };
+        // The project is locked until the result is applied; a clone's folder is hidden too.
+        *self.lock.borrow_mut() = Some(Lock {
+            project: project.to_string(),
+            hidden: matches!(job, Job::Clone { .. }),
+        });
+        self.gh_job = Some(Running { rx, dir, created, project: project.to_string(), token, chip });
         let ed = self.editor();
         ed.set_gh_busy(true);
+        ed.set_gh_chip(format!("GitHub: {chip}").into());
         ed.set_gh_error("".into());
         ed.set_gh_result("".into());
+        // The new project must not show up in the list while it is being made.
+        self.refresh_lists();
         let me = self.me.clone();
         self.gh_timer.start(slint::TimerMode::Repeated, POLL, move || poll(me.clone()));
     }
@@ -189,6 +213,8 @@ impl Glue {
 
     /// The job finished: shows what happened and brings the editor up to date.
     fn gh_done(&mut self, run: Running, outcome: Outcome) {
+        // Unlock first: applying the result (reloading, opening) writes through the store.
+        *self.lock.borrow_mut() = None;
         let ed = self.editor();
         ed.set_gh_busy(false);
         let Running { project, token, .. } = run;
@@ -196,6 +222,15 @@ impl Glue {
             g.gh_error(&github::redact(&github::error_text(e), &token));
         };
         match outcome {
+            // The dialog was closed (or is on another page) while the clone ran: do not pull
+            // the user away from what they are doing; the project is in the list now.
+            Outcome::Cloned(Ok(state)) if ed.get_gh_mode() != 2 => {
+                self.refresh_lists();
+                self.gh_result(&format!(
+                    "{project} を取り込みました({} ファイル)。メニューから開けます",
+                    state.files.len()
+                ));
+            }
             Outcome::Cloned(Ok(state)) => {
                 let files = state.files.len();
                 ed.set_gh_mode(0);
@@ -216,7 +251,10 @@ impl Glue {
                     )),
                 }
             }
-            Outcome::Cloned(Err(e)) => show_err(self, &e),
+            Outcome::Cloned(Err(e)) => {
+                self.refresh_lists();
+                show_err(self, &e);
+            }
             Outcome::Pulled(Ok(report)) => {
                 let changed: Vec<String> =
                     report.updated.iter().chain(&report.deleted).cloned().collect();
@@ -248,6 +286,27 @@ impl Glue {
                 self.gh_refresh();
                 show_err(self, &e);
             }
+        }
+        self.gh_refresh();
+        self.gh_announce();
+    }
+
+    /// With the dialog closed nobody sees `gh_result` / `gh_error`: say how it ended in a toast.
+    fn gh_announce(&mut self) {
+        let ed = self.editor();
+        if ed.get_gh_mode() != 0 {
+            return;
+        }
+        let error = ed.get_gh_error().to_string();
+        let text = if !error.is_empty() { format!("GitHub: {error}") } else { ed.get_gh_result().to_string() };
+        if text.is_empty() {
+            return;
+        }
+        let conflicts = slint::Model::row_count(&ed.get_gh_conflicts()) > 0;
+        if conflicts {
+            self.toast(&format!("{text}\n両方で変更されたファイルがあります。メニューの「GitHub」で解決してください"));
+        } else {
+            self.toast(&text);
         }
     }
 
@@ -347,11 +406,14 @@ fn poll(me: Weak<RefCell<Glue>>) {
         Err(TryRecvError::Empty) => g.gh_job = Some(run),
         Err(TryRecvError::Disconnected) => {
             g.gh_timer.stop();
+            *g.lock.borrow_mut() = None;
             if run.created {
                 // The worker died mid-clone: remove what it may have left (it made the folder).
                 let _ = std::fs::remove_dir_all(&run.dir);
             }
             g.editor().set_gh_busy(false);
+            g.refresh_lists();
+            g.gh_refresh();
             g.gh_error("通信の処理が途中で止まりました。もう一度お試しください");
         }
     }

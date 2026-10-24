@@ -238,9 +238,10 @@ export component GitHubDialog inherits Rectangle {
                     }
                 }
                 if root.busy: Text {
-                    text: "通信中…";
+                    text: "通信中…(閉じても続きます。このプロジェクトは終わるまで編集できません)";
                     color: #4fc3f7;
                     font-size: 13px;
+                    wrap: word-wrap;
                 }
                 if root.result != "" && root.error == "": Text {
                     text: root.result;
@@ -265,7 +266,6 @@ export component GitHubDialog inherits Rectangle {
             spacing: 8px;
             ToolButton {
                 text: root.mode == 2 ? "キャンセル" : "閉じる";
-                enabled: !root.busy;
                 clicked => { root.close(); }
             }
             if root.mode == 2: ToolButton {

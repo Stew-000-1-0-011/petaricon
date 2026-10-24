@@ -10,6 +10,7 @@ use slint_doc::Document;
 use storage::ProjectStore;
 
 use crate::github::ApiFactory;
+use crate::lockstore::{LOCKED_TEXT, LockedStore, SharedLock};
 use crate::nav::{self, Nav};
 use crate::session::{Corner, PreviewKind, Session, TidyReport, TreeAction, TreeRow, parse_screen_size};
 use crate::tidy_overlay::{self, MarkKind};
@@ -273,6 +274,8 @@ pub struct Glue {
     api: ApiFactory,
     /// The GitHub transfer in flight, if any.
     gh_job: Option<gh::Running>,
+    /// The project a transfer works on, locked until its result is applied (see `lockstore`).
+    lock: SharedLock,
     gh_timer: slint::Timer,
 }
 
@@ -335,6 +338,21 @@ impl Glue {
             .into_iter()
             .next()
             .ok_or_else(|| format!("プロジェクト {project} に .slint ファイルがありません"))
+    }
+
+    /// Is `project` locked by a running GitHub transfer?
+    fn locked(&self, project: &str) -> bool {
+        self.lock.borrow().as_ref().is_some_and(|l| l.project == project)
+    }
+
+    /// Refuses an edit of the open project while a transfer works on it (the store refuses
+    /// the writes as well; this gives the message before anything changes in memory).
+    fn edit_refused(&self) -> bool {
+        let refused = self.locked(&self.project);
+        if refused {
+            self.set_error(LOCKED_TEXT);
+        }
+        refused
     }
 
     fn set_error(&self, text: &str) {
@@ -548,6 +566,9 @@ impl Glue {
 
     fn tidy(&mut self) {
         self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
         match self.session.tidy_free_selection(self.tolerance as f32) {
             Ok(report) => {
                 if report.changed > 0 {
@@ -643,6 +664,9 @@ impl Glue {
 
     fn stack(&mut self) {
         self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
         match self.session.stack_selection() {
             Ok(warnings) => {
                 self.rebuild();
@@ -665,12 +689,18 @@ impl Glue {
 
     fn unstack(&mut self) {
         self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
         let r = self.session.unstack_selection();
         self.after_edit(r);
     }
 
     fn guide_edited(&mut self, property: &str, value: &str) {
         self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
         let r = self.session.set_guide_property(property, value);
         self.after_edit(r);
     }
@@ -776,6 +806,9 @@ impl Glue {
     /// Saves if there are unsaved edits. Returns false when a save was needed and failed.
     pub fn save(&mut self) -> bool {
         self.begin_action();
+        if self.session.doc().is_dirty() && self.edit_refused() {
+            return false;
+        }
         let ed = self.editor();
         let r = save_or_recover(
             &*self.store,
@@ -801,6 +834,16 @@ impl Glue {
         ok
     }
 
+    /// The Save button: refused while a transfer works on the project, even when there is
+    /// nothing to write (the button does what it says or says why not).
+    fn save_pressed(&mut self) {
+        self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
+        self.save();
+    }
+
     fn after_edit(&mut self, result: Result<(), crate::session::SessionError>) {
         match result {
             Ok(()) => self.rebuild(),
@@ -821,6 +864,9 @@ impl Glue {
 
     fn tree_action(&mut self, action: i32) {
         self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
         let action = match action {
             0 => TreeAction::Up,
             1 => TreeAction::Down,
@@ -838,6 +884,9 @@ impl Glue {
 
     fn palette_picked(&mut self, name: &str) {
         self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
         let ed = self.editor();
         let hint = (
             -ed.get_canvas_pan_x() / self.zoom,
@@ -858,12 +907,18 @@ impl Glue {
 
     fn drag_finished(&mut self, dx: f32, dy: f32) {
         self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
         let r = self.session.move_selection(dx / self.zoom, dy / self.zoom);
         self.after_edit(r);
     }
 
     fn resize_finished(&mut self, corner: i32, dx: f32, dy: f32) {
         self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
         let r = self
             .session
             .resize_selection(corner_from(corner), dx / self.zoom, dy / self.zoom);
@@ -872,6 +927,9 @@ impl Glue {
 
     fn history(&mut self, undo: bool) {
         self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
         self.clear_tidy();
         self.discard_source_edits();
         let changed = if undo { self.session.undo() } else { self.session.redo() };
@@ -882,6 +940,9 @@ impl Glue {
 
     /// Queues an edit of a panel field: a preview field (`@name`) or an element property.
     fn queue_field(&mut self, name: &str, value: &str) -> bool {
+        if self.edit_refused() {
+            return false;
+        }
         let Some(preview) = name.strip_prefix(PREVIEW_FIELD) else {
             return self.queue_prop(name, value);
         };
@@ -935,6 +996,12 @@ impl Glue {
     /// Applies the pending edit unless the selection or the document changed since it was typed.
     fn commit_prop(&mut self, refresh_props: bool) {
         self.prop_timer.stop();
+        if self.locked(&self.project) {
+            // Nothing is pending when a transfer starts (it flushes first); drop stragglers.
+            self.pending_prop = None;
+            self.pending_preview = None;
+            return;
+        }
         self.commit_preview(refresh_props);
         let Some(p) = self.pending_prop.take() else { return };
         if p.doc != (self.project.clone(), self.file.clone())
@@ -993,6 +1060,9 @@ impl Glue {
     /// 真 / 偽 chips: sets (or, for an empty value, clears) the value of a bool property.
     fn preview_set(&mut self, name: &str, value: &str) {
         self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
         if self.session.set_preview_value(name, value) {
             self.preview_changed(true);
         }
@@ -1001,6 +1071,9 @@ impl Glue {
     /// A screen size chip.
     fn screen_size_chosen(&mut self, w: i32, h: i32) {
         self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
         self.session.set_screen_size((w.max(1) as u32, h.max(1) as u32));
         self.fit_zoom();
         self.preview_changed(true);
@@ -1026,6 +1099,9 @@ impl Glue {
     /// Replaces the shown source range of the document with the edited text.
     fn source_apply(&mut self, text: &str) {
         self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
         let Some((start, original)) = self.source_view.clone() else {
             self.set_error("反映するソースが表示されていません");
             return;
@@ -1059,6 +1135,10 @@ impl Glue {
 
     fn create_project(&mut self, name: &str) {
         self.begin_action();
+        if self.locked(name) {
+            self.set_error(&format!("プロジェクト {name} は GitHub から取り込み中です"));
+            return;
+        }
         match self.store.create_project(name) {
             Ok(()) => {
                 self.refresh_lists();
@@ -1107,6 +1187,19 @@ impl Glue {
         self.dialog_error("");
         let project = if mode == 2 { self.project.clone() } else { project.to_string() };
         let project = project.as_str();
+        let refused = match mode {
+            // New file / rename file / rename project / save as: the project they change,
+            // and for the last two the name they would take.
+            1 => self.locked(project),
+            2 => self.locked(project),
+            3 => self.locked(project) || self.locked(name),
+            4 => self.locked(project) || self.locked(&self.project),
+            _ => false,
+        };
+        if refused {
+            self.dialog_error(LOCKED_TEXT);
+            return;
+        }
         if (1..=4).contains(&mode) && !self.name_free(mode, project, name) {
             return;
         }
@@ -1248,7 +1341,10 @@ impl Glue {
 
     /// Offers the recovery copy of the open file, if there is a different one.
     fn check_recovery(&mut self) {
-        if !self.loaded {
+        // Asked again when the project is opened after the transfer.
+        if !self.loaded || self.locked(&self.project) {
+            self.editor().set_recovery_open(false);
+            self.recovered = None;
             return;
         }
         self.recovered = match pending_recovery(
@@ -1268,6 +1364,9 @@ impl Glue {
 
     fn recovery_answered(&mut self, restore: bool) {
         self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
         self.editor().set_recovery_open(false);
         let Some((project, file, text)) = self.recovered.take() else { return };
         if restore {
@@ -1287,6 +1386,9 @@ impl Glue {
     }
 
     fn recovery_tick(&mut self) {
+        if self.locked(&self.project) {
+            return;
+        }
         match recovery_tick(
             &*self.store,
             &self.project,
@@ -1307,6 +1409,9 @@ impl Glue {
 
     fn extract_open(&mut self) {
         self.begin_action();
+        if self.edit_refused() {
+            return;
+        }
         if self.session.selection().is_none() {
             self.set_error("部品にする要素を選んでください");
             return;
@@ -1330,6 +1435,10 @@ impl Glue {
 
     fn extract_run(&mut self, name: &str) {
         self.begin_action();
+        if self.locked(&self.project) {
+            self.editor().set_dialog_error(LOCKED_TEXT.into());
+            return;
+        }
         match self.session.extract_selection(name) {
             Ok(()) => {
                 self.discard_source_edits();
@@ -1345,6 +1454,10 @@ impl Glue {
 
     fn declaration_add(&mut self, kind: i32, ty: &str, name: &str) {
         self.begin_action();
+        if self.locked(&self.project) {
+            self.editor().set_dialog_error(LOCKED_TEXT.into());
+            return;
+        }
         let Some(kind) = crate::session::DeclKind::from_index(kind) else { return };
         let component = self.extracted.clone();
         match self.session.add_declaration(&component, kind, ty, name) {
@@ -1424,7 +1537,7 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_resize_finished, |g, c, dx, dy| g.resize_finished(c, dx, dy));
     on!(on_undo, |g| g.history(true));
     on!(on_redo, |g| g.history(false));
-    on!(on_save, |g| { g.save(); });
+    on!(on_save, |g| g.save_pressed());
     on!(on_open, |g, p, f| g.open_file(&p, &f));
     on!(on_select_project, |g, p| g.select_project(&p));
     on!(on_create_project, |g, n| g.create_project(&n));
@@ -1475,6 +1588,8 @@ pub fn start_with(
     store: Box<dyn ProjectStore>,
     api: ApiFactory,
 ) -> Result<(), slint::PlatformError> {
+    let lock: SharedLock = Rc::new(RefCell::new(None));
+    let store: Box<dyn ProjectStore> = Box::new(LockedStore::new(store, lock.clone()));
     let (project, file) = startup_target(&*store).map_err(platform_err)?;
 
     let tolerance = stored_tolerance(&*store);
@@ -1514,6 +1629,7 @@ pub fn start_with(
             nav: Nav::default(),
             api,
             gh_job: None,
+            lock,
             gh_timer: slint::Timer::default(),
         })
     });

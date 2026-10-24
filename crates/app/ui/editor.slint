@@ -88,6 +88,8 @@ export component Editor inherits Window {
     in property <string> gh-status-text;
     in property <[string]> gh-conflicts;
     in property <bool> gh-busy;
+    // Status chip in the message band while a transfer runs, or conflicts wait ("" none).
+    in property <string> gh-chip;
     in property <string> gh-result;
     in property <string> gh-error;
     in-out property <string> gh-repo;
@@ -290,7 +292,7 @@ export component Editor inherits Window {
     // Below this width the toolbar needs two rows.
     property <bool> narrow: root.content-w < 600px;
     property <length> toolbar-h: root.narrow ? 2 * (root.row-h + 8px) : root.row-h + 8px;
-    property <length> band-h: root.error-text != "" ? 44px : root.message != "" ? 30px : 0px;
+    property <length> band-h: root.error-text != "" ? 44px : (root.message != "" || root.gh-chip != "") ? 30px : 0px;
     property <length> content-y: root.inset-top + root.toolbar-h + root.band-h;
     property <length> content-h: root.height - root.content-y - root.inset-bottom;
     in-out property <length> panel-h: 0px;
@@ -388,6 +390,23 @@ export component Editor inherits Window {
         TouchArea {
             enabled: root.error-text != "";
             clicked => { root.error-tapped(); }
+        }
+        if root.gh-chip != "": Rectangle {
+            x: parent.width - self.width - 4px;
+            y: 2px;
+            width: min(190px, parent.width / 2);
+            height: parent.height - 4px;
+            border-radius: 4px;
+            background: #1565c0;
+            Text {
+                text: root.gh-chip;
+                color: white;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            TouchArea { clicked => { root.gh-open(); } }
         }
     }
 

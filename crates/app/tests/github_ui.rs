@@ -20,11 +20,15 @@ struct Shared {
     fail: Arc<std::sync::Mutex<Option<ApiError>>>,
     tokens: Arc<std::sync::Mutex<Vec<String>>>,
     poison: Poison,
+    gate: Gate,
 }
 
 type Poison = Arc<std::sync::Mutex<Option<std::path::PathBuf>>>;
 
-struct Api(Arc<Fake>, Arc<std::sync::Mutex<Option<ApiError>>>, Poison);
+/// The next job blocks in its first call: it signals `reached`, then waits for `release`.
+type Gate = Arc<std::sync::Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>>;
+
+struct Api(Arc<Fake>, Arc<std::sync::Mutex<Option<ApiError>>>, Poison, Gate);
 
 impl Api {
     fn check(&self) -> Result<(), ApiError> {
@@ -37,6 +41,11 @@ impl Api {
 
 impl GitHubApi for Api {
     fn branch_head(&self, r: &str, b: &str) -> Result<String, ApiError> {
+        let gate = self.3.lock().unwrap().take();
+        if let Some((reached, release)) = gate {
+            reached.send(()).unwrap();
+            release.recv().unwrap();
+        }
         self.check()?;
         self.0.branch_head(r, b)
     }
@@ -118,12 +127,18 @@ fn setup(token: Option<&str>) -> Env {
         fail: Arc::new(std::sync::Mutex::new(None)),
         tokens: Arc::new(std::sync::Mutex::new(Vec::new())),
         poison: Arc::new(std::sync::Mutex::new(None)),
+        gate: Arc::new(std::sync::Mutex::new(None)),
     };
-    let (fake, fail, tokens, poison) =
-        (shared.fake.clone(), shared.fail.clone(), shared.tokens.clone(), shared.poison.clone());
+    let (fake, fail, tokens, poison, gate) = (
+        shared.fake.clone(),
+        shared.fail.clone(),
+        shared.tokens.clone(),
+        shared.poison.clone(),
+        shared.gate.clone(),
+    );
     let factory: ApiFactory = Arc::new(move |token: &str| -> BoxApi {
         tokens.lock().unwrap().push(token.to_string());
-        Box::new(Api(fake.clone(), fail.clone(), poison.clone()))
+        Box::new(Api(fake.clone(), fail.clone(), poison.clone(), gate.clone()))
     });
     let editor = app::Editor::new().unwrap();
     app::glue::start_with(&editor, Box::new(store), factory).unwrap();
@@ -601,29 +616,197 @@ fn hiding_the_keyboard_keeps_what_was_typed() {
     assert_eq!(e.get_bar_text().as_str(), "");
 }
 
+/// Blocks the next job in its first call. Returns (wait until it is there, let it go).
+fn arm(env: &Env) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    *env.shared.gate.lock().unwrap() = Some((reached_tx, release_rx));
+    (reached_rx, release_tx)
+}
+
+fn reached(rx: &std::sync::mpsc::Receiver<()>) {
+    rx.recv_timeout(Duration::from_secs(10)).expect("the transfer reached its call");
+}
+
+/// Lets the timers run a while (for results that must NOT show up).
+fn pump(editor: &app::Editor) {
+    for _ in 0..40 {
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(60));
+        slint::platform::update_timers_and_animations();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = editor;
+}
+
+const LOCKED: &str = "GitHub と通信中のため、このプロジェクトは編集できません";
+
+fn project_text(env: &Env, project: &str) -> String {
+    std::fs::read_to_string(env.root().join(project).join("main.slint")).unwrap()
+}
+
 #[test]
-fn edits_made_while_a_pull_runs_are_kept_as_a_local_copy_not_lost() {
+fn a_pull_runs_in_the_background_and_locks_only_its_project() {
     let env = setup(Some(TOKEN));
     let e = &env.editor;
     linked(&env);
     e.invoke_gh_open();
     env.fake().commit("dev", &[("crates/ui/main.slint", Some(SRC2.as_bytes()))]);
+    let (at_call, release) = arm(&env);
     e.invoke_gh_pull();
+    reached(&at_call);
     assert!(e.get_gh_busy());
-    make_dirty(e); // typed while the transfer runs
-    wait(e);
-    assert!(e.get_gh_error().contains("main.slint.local"), "{}", e.get_gh_error());
-    // The fetched version is open and clean, the edits are in the .local copy.
-    assert_eq!(strings(e.get_components()), vec!["Main", "Extra"]);
+    assert!(e.get_gh_chip().contains("取り込み中"), "{}", e.get_gh_chip());
+
+    // 閉じる works while busy (the dialog's own button just sets the mode and calls this).
+    e.set_gh_mode(0);
+    e.invoke_gh_closed();
+    assert_eq!(e.get_gh_mode(), 0);
+
+    // Every kind of edit of the locked project is refused, with the one message.
+    let on_disk = project_text(&env, "ui");
+    let z = e.get_zoom_level();
+    e.invoke_tapped(60. * z, 60. * z);
+    assert!(e.get_has_selection(), "selecting is viewing");
+    e.invoke_drag_finished(40. * z, 40. * z);
+    assert_eq!(e.get_error_text().as_str(), LOCKED);
     assert!(!e.get_dirty());
-    let kept = std::fs::read_to_string(env.root().join("ui/main.slint.local")).unwrap();
-    assert_ne!(kept, SRC, "the dragged box is in the kept copy");
-    assert!(kept.contains("component Main") && !kept.contains("Extra"));
-    // Saving now cannot replace the remote change with the edits, and nothing is a silent
-    // local change: the push has nothing to send.
-    e.invoke_gh_push("m".into());
+    e.invoke_prop_accepted("x".into(), "20".into());
+    assert_eq!(e.get_error_text().as_str(), LOCKED);
+    e.invoke_palette_picked("Rectangle".into());
+    assert_eq!(e.get_error_text().as_str(), LOCKED);
+    e.invoke_tree_action(4);
+    assert_eq!(e.get_error_text().as_str(), LOCKED);
+    e.invoke_undo();
+    assert_eq!(e.get_error_text().as_str(), LOCKED);
+    e.invoke_stack();
+    assert_eq!(e.get_error_text().as_str(), LOCKED);
+    e.invoke_save();
+    assert_eq!(e.get_error_text().as_str(), LOCKED);
+    e.invoke_file_op_run(1, "more".into(), "ui".into());
+    assert_eq!(e.get_dialog_error().as_str(), LOCKED);
+    e.invoke_file_op_run(3, "renamed".into(), "ui".into());
+    assert_eq!(e.get_dialog_error().as_str(), LOCKED);
+    assert!(!e.get_dirty());
+    assert_eq!(project_text(&env, "ui"), on_disk);
+    assert!(!env.root().join("ui/more.slint").exists());
+    assert!(env.root().join("ui").is_dir() && !env.root().join("renamed").exists());
+    // Viewing is still allowed: switching file/component inside the project.
+    e.invoke_open("ui".into(), "main.slint".into());
+    assert_eq!(e.get_current_project().as_str(), "ui");
+    assert_eq!(e.get_error_text().as_str(), "", "{}", e.get_error_text());
+
+    // Another project is fully usable: switch, edit, save, create.
+    e.invoke_open("default".into(), "main.slint".into());
+    assert_eq!(e.get_current_project().as_str(), "default");
+    let before = project_text(&env, "default");
+    e.invoke_palette_picked("Rectangle".into());
+    assert!(e.get_dirty(), "{}", e.get_error_text());
+    e.invoke_save();
+    assert!(!e.get_dirty(), "{}", e.get_error_text());
+    assert_ne!(project_text(&env, "default"), before);
+    e.invoke_create_project("other".into());
+    assert!(env.root().join("other").is_dir());
+    // Back in the locked one: still locked.
+    e.invoke_open("ui".into(), "main.slint".into());
+    e.invoke_tapped(60. * z, 60. * z);
+    e.invoke_drag_finished(40. * z, 40. * z);
+    assert_eq!(e.get_error_text().as_str(), LOCKED);
+
+    // The result is applied when the call returns, dialog closed or not.
+    release.send(()).unwrap();
     wait(e);
-    assert!(e.get_gh_error().contains("送る変更がありません"), "{}", e.get_gh_error());
+    assert_eq!(project_text(&env, "ui"), SRC2);
+    assert_eq!(strings(e.get_components()), vec!["Main", "Extra"], "the open project was reloaded");
+    assert!(e.get_toast_text().contains("取り込みました"), "{}", e.get_toast_text());
+    assert_eq!(e.get_gh_chip().as_str(), "");
+    // Unlocked again.
+    e.invoke_palette_picked("Rectangle".into());
+    assert!(e.get_dirty(), "{}", e.get_error_text());
+}
+
+#[test]
+fn a_pull_that_ends_with_conflicts_points_to_the_dialog() {
+    let env = setup(Some(TOKEN));
+    let e = &env.editor;
+    linked(&env);
+    std::fs::write(env.root().join("ui/other.slint"), "mine\n").unwrap();
+    env.fake().commit("dev", &[("crates/ui/other.slint", Some(b"theirs\n"))]);
+    let (at_call, release) = arm(&env);
+    e.invoke_gh_pull();
+    reached(&at_call);
+    release.send(()).unwrap();
+    wait(e);
+    assert!(e.get_toast_text().contains("GitHub"), "{}", e.get_toast_text());
+    assert!(e.get_gh_chip().contains("競合 1 件"), "{}", e.get_gh_chip());
+    e.invoke_gh_open();
+    assert_eq!(strings(e.get_gh_conflicts()), vec!["other.slint"]);
+}
+
+#[test]
+fn a_push_locks_the_project_and_refuses_save() {
+    let env = setup(Some(TOKEN));
+    let e = &env.editor;
+    linked(&env);
+    std::fs::write(env.root().join("ui/other.slint"), "export component Other inherits Rectangle {}\n// x\n").unwrap();
+    let (at_call, release) = arm(&env);
+    e.invoke_gh_push("m".into());
+    reached(&at_call);
+    assert!(e.get_gh_chip().contains("送信中"), "{}", e.get_gh_chip());
+    e.invoke_save();
+    assert_eq!(e.get_error_text().as_str(), LOCKED);
+    // The Android pause hook does not write the locked project either.
+    assert!(app::glue::save_now());
+    release.send(()).unwrap();
+    wait(e);
+    assert!(e.get_gh_result().contains("送りました"), "{}", e.get_gh_result());
+    e.invoke_save();
+    assert_eq!(e.get_error_text().as_str(), "");
+}
+
+#[test]
+fn a_clone_in_progress_is_hidden_and_cannot_be_opened() {
+    let env = setup(Some(TOKEN));
+    let e = &env.editor;
+    let (at_call, release) = arm(&env);
+    import(&env, "ui");
+    reached(&at_call);
+    assert!(e.get_gh_busy());
+    assert_eq!(strings(e.get_projects()), vec!["default"]);
+    e.invoke_open("ui".into(), "main.slint".into());
+    assert_eq!(e.get_current_project().as_str(), "default");
+    e.invoke_create_project("ui".into());
+    assert_eq!(strings(e.get_projects()), vec!["default"]);
+    assert!(!e.get_error_text().is_empty());
+    // The user may keep working elsewhere; closing the dialog is fine.
+    e.set_gh_mode(0);
+    e.invoke_gh_closed();
+    release.send(()).unwrap();
+    wait(e);
+    // The dialog was closed: the user is not pulled into the new project.
+    assert_eq!(e.get_current_project().as_str(), "default");
+    assert_eq!(strings(e.get_projects()), vec!["default", "ui"]);
+    assert!(e.get_toast_text().contains("取り込みました"), "{}", e.get_toast_text());
+    e.invoke_open("ui".into(), "main.slint".into());
+    assert_eq!(e.get_current_project().as_str(), "ui");
+}
+
+#[test]
+fn a_second_transfer_is_refused_while_one_runs() {
+    let env = setup(Some(TOKEN));
+    let e = &env.editor;
+    linked(&env);
+    let (at_call, release) = arm(&env);
+    e.invoke_gh_pull();
+    reached(&at_call);
+    e.invoke_gh_push("m".into());
+    assert!(e.get_gh_error().contains("通信中"), "{}", e.get_gh_error());
+    e.invoke_gh_pull();
+    assert!(e.get_gh_error().contains("通信中"), "{}", e.get_gh_error());
+    assert_eq!(env.shared.tokens.lock().unwrap().len(), 2, "no third worker was started");
+    release.send(()).unwrap();
+    wait(e);
+    pump(e);
+    assert!(!e.get_gh_busy());
 }
 
 #[test]
