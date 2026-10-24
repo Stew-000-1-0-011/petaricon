@@ -48,6 +48,17 @@ pub enum Op {
     /// Inserts the one-line declaration `text` into the root element of `component`: after its
     /// last property / callback declaration, else at the top of its body.
     AddDeclaration { component: String, text: String },
+    /// Turns the binding `property` of the element at `path` into a parameter of its
+    /// component: adds `in property <ty> name: <old expression>;` to the component's root
+    /// element (placed as `Op::AddDeclaration` does) and rewrites the binding to
+    /// `property: root.name;`. Refused (nothing changes) when the property has no value, the
+    /// expression mentions `self` or `parent`, it already is `root.<name>`, or `name` is taken.
+    Parameterize {
+        path: ElementPath,
+        property: String,
+        name: String,
+        ty: String,
+    },
 }
 
 /// Description of the layout created by [`Op::WrapInLayout`].
@@ -709,7 +720,123 @@ fn add_declaration(
     }
 }
 
+/// The `Binding` of `property` on `element`.
+fn find_binding(element: &SyntaxNode, property: &str) -> Option<SyntaxNode> {
+    element.children().find(|b| {
+        b.kind() == SyntaxKind::Binding
+            && b.child_text(SyntaxKind::Identifier)
+                .is_some_and(|n| n == property)
+    })
+}
+
+/// Names declared (properties and callbacks) on the root element of `component`.
+fn declared_names(root: &SyntaxNode, component: &str) -> Vec<String> {
+    syntax::component_node(root, component)
+        .and_then(|c| syntax::component_element(&c))
+        .into_iter()
+        .flat_map(|e| e.children())
+        .filter(|n| {
+            matches!(
+                n.kind(),
+                SyntaxKind::PropertyDeclaration | SyntaxKind::CallbackDeclaration
+            )
+        })
+        .filter_map(|n| {
+            n.child_node(SyntaxKind::DeclaredIdentifier)
+                .map(|d| d.text().to_string().trim().to_string())
+        })
+        .collect()
+}
+
+/// The expression of `property` on the element at `path` if it can become a parameter, else
+/// the reason (short Japanese text) it cannot.
+fn parameter_source(
+    root: &SyntaxNode,
+    path: &ElementPath,
+    property: &str,
+) -> Result<(SyntaxNode, String), EditError> {
+    let (_, element) = resolve_in(root, path)?;
+    let refuse = |m: &str| Err(EditError::InvalidTarget(m.to_string()));
+    let Some(binding) = find_binding(&element, property) else {
+        return refuse("先に値を入れてください");
+    };
+    let Some(expr_node) = binding.child_node(SyntaxKind::BindingExpression) else {
+        return refuse("先に値を入れてください");
+    };
+    let raw = expr_node.text().to_string();
+    let expr = raw.trim();
+    let expr = expr.strip_suffix(';').unwrap_or(expr).trim().to_string();
+    if expr.is_empty() {
+        return refuse("先に値を入れてください");
+    }
+    if expr_node.descendants_with_tokens().any(|e| {
+        e.as_token().is_some_and(|t| {
+            t.kind() == SyntaxKind::Identifier && matches!(t.text(), "self" | "parent")
+        })
+    }) {
+        return refuse("self や parent を使う値は引数にできません");
+    }
+    if expr
+        .strip_prefix("root.")
+        .is_some_and(|r| valid_identifier(r.trim()))
+    {
+        return refuse("すでに引数です");
+    }
+    Ok((expr_node, expr))
+}
+
+/// The edits for `Op::Parameterize`.
+fn parameterize(
+    text: &str,
+    root: &SyntaxNode,
+    path: &ElementPath,
+    property: &str,
+    name: &str,
+    ty: &str,
+) -> Result<Vec<TextEdit>, EditError> {
+    if !valid_identifier(name) {
+        return Err(EditError::InvalidTarget(format!(
+            "`{name}` は名前に使えません"
+        )));
+    }
+    if !valid_identifier(ty) {
+        return Err(EditError::InvalidTarget(format!("`{ty}` は使えない型です")));
+    }
+    let (expr_node, expr) = parameter_source(root, path, property)?;
+    if declared_names(root, &path.component).iter().any(|n| n == name) {
+        return Err(EditError::InvalidTarget(format!(
+            "`{name}` はすでに宣言されています"
+        )));
+    }
+    let decl = add_declaration(
+        text,
+        root,
+        &path.component,
+        &format!("in property <{ty}> {name}: {expr};"),
+    )?;
+    let (start, end) = range(&expr_node);
+    Ok(vec![
+        decl,
+        TextEdit {
+            start,
+            end,
+            text: format!("root.{name};"),
+        },
+    ])
+}
+
 impl Document {
+    /// The expression `property` of the element at `path` would give a parameter as its
+    /// default, or why it cannot become one.
+    pub fn parameter_source(&self, path: &ElementPath, property: &str) -> Result<String, EditError> {
+        parameter_source(&self.parse(), path, property).map(|(_, e)| e)
+    }
+
+    /// Properties and callbacks declared on the root element of `component`.
+    pub fn declared_names(&self, component: &str) -> Vec<String> {
+        declared_names(&self.parse(), component)
+    }
+
     /// Applies `op`. Returns the (post-edit) path of the edited element.
     pub fn apply(&mut self, op: Op) -> Result<Option<ElementPath>, EditError> {
         let root = self.parse();
@@ -953,6 +1080,15 @@ impl Document {
             Op::AddDeclaration { component, text } => {
                 let edit = add_declaration(&self.text, &root, &component, &text)?;
                 (apply_edits(&self.text, vec![edit])?, None)
+            }
+            Op::Parameterize {
+                path,
+                property,
+                name,
+                ty,
+            } => {
+                let edits = parameterize(&self.text, &root, &path, &property, &name, &ty)?;
+                (apply_edits(&self.text, edits)?, None)
             }
         };
         self.set_text(new_text);

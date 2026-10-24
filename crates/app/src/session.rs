@@ -361,6 +361,21 @@ impl DeclKind {
     }
 }
 
+/// The type of a property that takes part in "make this a parameter", from its name.
+pub fn parameter_type(property: &str) -> Option<&'static str> {
+    match property {
+        "text" => Some("string"),
+        "x" | "y" | "width" | "height" | "font-size" | "border-radius" | "border-width"
+        | "spacing" => Some("length"),
+        p if p.starts_with("padding") => Some("length"),
+        "color" | "background" | "border-color" => Some("brush"),
+        "visible" | "enabled" => Some("bool"),
+        "opacity" => Some("float"),
+        "source" => Some("image"),
+        _ => None,
+    }
+}
+
 /// `[A-Za-z_][A-Za-z0-9_-]*`
 pub fn is_identifier(name: &str) -> bool {
     let mut chars = name.chars();
@@ -863,7 +878,10 @@ impl Session {
     /// (insert, remove, move, wrap, unwrap, extract) are refused with `Compile`; `SetBindings`
     /// and `AddDeclaration` stay allowed.
     pub fn apply(&mut self, op: Op) -> Result<(), SessionError> {
-        let structural = !matches!(op, Op::SetBindings { .. } | Op::AddDeclaration { .. });
+        let structural = !matches!(
+            op,
+            Op::SetBindings { .. } | Op::AddDeclaration { .. } | Op::Parameterize { .. }
+        );
         if structural && !self.diagnostics.is_empty() && !self.removal_is_safe(&op) {
             return Err(SessionError::Compile(self.diagnostics.clone()));
         }
@@ -1007,7 +1025,13 @@ impl Session {
         if current == expr.clone().unwrap_or_default() {
             return Ok(());
         }
-        let op = Op::SetBindings { path, bindings: vec![(name.to_string(), expr)] };
+        self.apply_validated(Op::SetBindings { path, bindings: vec![(name.to_string(), expr)] })
+    }
+
+    /// Applies `op` after trying it on a scratch copy: refused with `Rejected` (nothing
+    /// changed) when it adds a syntax error or, while the document compiles, breaks the
+    /// compile. A compile that succeeded is kept for the next `rebuild`.
+    fn apply_validated(&mut self, op: Op) -> Result<(), SessionError> {
         let new_text = self.doc.preview_apply(op.clone())?;
         self.refuse_new_syntax_errors(&new_text)?;
         let mut built = None;
@@ -1032,6 +1056,75 @@ impl Session {
             });
         }
         Ok(())
+    }
+
+    /// The type a parameter made from `property` gets, from the name alone.
+    pub fn parameter_type(property: &str) -> Option<&'static str> {
+        parameter_type(property)
+    }
+
+    /// Whether `property` of the selection can become a parameter of the component being
+    /// edited: the default name and the type the table gives (`None`: the user must choose),
+    /// or the reason (short Japanese text) it cannot.
+    pub fn can_parameterize(
+        &self,
+        property: &str,
+    ) -> Result<(String, Option<&'static str>), String> {
+        let path = self.selection.as_ref().ok_or("要素が選ばれていません")?;
+        if path.component != self.component {
+            return Err("部品の中を開いてから選んでください".into());
+        }
+        self.doc
+            .parameter_source(path, property)
+            .map_err(|e| match e {
+                EditError::InvalidTarget(m) => m,
+                e => e.to_string(),
+            })?;
+        let info = self.doc.element(path).ok_or("要素が見つかりません")?;
+        let base = match &info.id {
+            Some(id) => id.clone(),
+            None => info.type_name.rsplit('.').next().unwrap_or("").to_lowercase(),
+        };
+        let taken = self.doc.declared_names(&path.component);
+        let first = format!("{base}-{property}");
+        let mut name = first.clone();
+        let mut n = 2;
+        while taken.contains(&name) {
+            name = format!("{first}-{n}");
+            n += 1;
+        }
+        Ok((name, parameter_type(property)))
+    }
+
+    /// Turns `property` of the selection into a parameter `name` of the component, in one
+    /// history step. `ty` overrides the table; without either the type is unknown and it is
+    /// refused. Refusals leave the document untouched.
+    pub fn parameterize(
+        &mut self,
+        property: &str,
+        name: &str,
+        ty: Option<&str>,
+    ) -> Result<(), SessionError> {
+        self.can_parameterize(property).map_err(SessionError::Rejected)?;
+        let path = self.selection.clone().ok_or(SessionError::NoSelection)?;
+        self.refuse_if_mismatch()?;
+        if !is_identifier(name) {
+            return Err(EditError::InvalidTarget(format!("`{name}` は名前に使えません")).into());
+        }
+        let ty = match ty {
+            Some(t) if DECL_TYPES.contains(&t) => t,
+            Some(t) => {
+                return Err(EditError::InvalidTarget(format!("`{t}` は使えない型です")).into());
+            }
+            None => parameter_type(property)
+                .ok_or_else(|| SessionError::Rejected("型が分かりません。型を選んでください".into()))?,
+        };
+        self.apply_validated(Op::Parameterize {
+            path,
+            property: property.to_string(),
+            name: name.to_string(),
+            ty: ty.to_string(),
+        })
     }
 
     /// `Rejected` when `new_text` has a syntax error the current text does not have.
