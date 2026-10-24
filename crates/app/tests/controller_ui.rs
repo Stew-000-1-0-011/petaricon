@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use app::glue::save_if_dirty;
 use app::session::{Session, SessionError};
-use slint_doc::{Document, ElementKind, TreeNode};
+use slint_doc::{Document, ElementKind, Op, TreeNode};
 use storage::{LocalStore, ProjectStore};
 
 fn fixture_dir() -> PathBuf {
@@ -163,6 +163,18 @@ fn moving_a_free_placed_element_changes_only_its_x_and_y() {
     })
     .expect("a free-placed Panel with x and y");
     s.select_path(target.info.path.clone());
+    // The fixture positions its panels by expressions, which a drag never overwrites (see
+    // the next test); this one is about a plain `px` position, so give the panel one.
+    let before = s.doc().text().to_string();
+    let r = s.move_selection(16., 8.);
+    assert!(matches!(r, Err(SessionError::Anchor(_))), "{r:?}");
+    assert_eq!(s.doc().text(), before);
+    s.apply(Op::SetBindings {
+        path: target.info.path.clone(),
+        bindings: vec![("x".into(), Some("40px".into())), ("y".into(), Some("40px".into()))],
+    })
+    .unwrap();
+    assert!(s.rebuild_standalone(480., 360.), "{:?}", s.diagnostics());
     let before = s.doc().text().to_string();
     s.move_selection(16., 8.).expect("move");
     let after = s.doc().text().to_string();

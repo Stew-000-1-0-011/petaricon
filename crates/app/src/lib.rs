@@ -1,3 +1,4 @@
+pub mod anchor;
 pub mod crashlog;
 pub mod font;
 pub mod github;

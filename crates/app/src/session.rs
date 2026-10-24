@@ -9,11 +9,67 @@ use slint_doc::{
     Document, EditError, ElementInfo, ElementKind, ElementPath, LayoutKind, Op, TreeNode,
 };
 
+use crate::anchor::{self, Anchor, Axis, Kind};
 use crate::guides::{self, Guides};
 use crate::layout_bridge::layout_spec;
 
 const MIN_SIZE: f32 = 4.0;
 const TAP_THRESHOLD: f32 = 8.0;
+
+/// Why an axis written as some other expression is not moved, resized or switched.
+pub const EXPR_ANCHOR: &str = "式で書かれているため動かせません(ソースで直せます)";
+/// Why children anchored right / centre / both sides cannot go into or out of a layout.
+const ANCHORED_CHILD: &str =
+    "右・下・中央・左右・上下に付いた子要素があるため変えられません(先に左・上に切り替えてください)";
+
+fn expr_refusal() -> SessionError {
+    SessionError::Anchor(EXPR_ANCHOR.into())
+}
+
+/// The anchor of one axis of `info`, from the written `x` / `width` (or `y` / `height`).
+fn anchor_of(info: &ElementInfo, axis: Axis) -> Anchor {
+    let written = |n: &str| {
+        info.bindings.iter().find(|b| b.name == n).map(|b| b.expr.trim()).unwrap_or_default()
+    };
+    anchor::read(axis, written(axis.pos()), written(axis.size()))
+}
+
+/// `(position, size)` of `r` along `axis`.
+fn span(r: &tidy::Rect, axis: Axis) -> (f32, f32) {
+    match axis {
+        Axis::H => (r.x, r.w),
+        Axis::V => (r.y, r.h),
+    }
+}
+
+/// A binding to write: the property and its new expression (`None` removes it).
+type Binding = (String, Option<String>);
+
+/// `(old start, old end, new start, new end)` of an edge pair of a resize.
+type Edges = (f32, f32, f32, f32);
+
+fn is_start(a: Anchor) -> bool {
+    matches!(a, Anchor::Start(_))
+}
+
+/// The bindings that write `anchor` on `axis`: the position, then the size when it is part of
+/// the anchor (`Stretch`) or `size_px` asks for it as a plain length.
+fn anchor_bindings(
+    axis: Axis,
+    anchor: Anchor,
+    size_px: Option<f32>,
+) -> Vec<Binding> {
+    let Some((pos, size)) = anchor::write(axis, anchor) else { return Vec::new() };
+    let mut out = vec![(axis.pos().to_string(), Some(pos))];
+    match (size, size_px) {
+        (Some(text), _) => out.push((axis.size().to_string(), Some(text))),
+        (None, Some(v)) => {
+            out.push((axis.size().to_string(), Some(format!("{}px", v.round() as i32))))
+        }
+        (None, None) => {}
+    }
+    out
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -31,6 +87,9 @@ pub enum SessionError {
     TidyOnLayout,
     #[error("選んだ要素は部品の利用ではありません。部品の利用を選んでください")]
     NotAUse,
+    /// An anchor edit that cannot keep what is written; nothing was changed.
+    #[error("{0}")]
+    Anchor(String),
     #[error("プレビューを更新中です。もう一度押してください")]
     PreviewUpdating,
     #[error("整える子要素がありません")]
@@ -844,10 +903,78 @@ impl Session {
         Ok((path, hit, in_layout))
     }
 
+    /// The horizontal and vertical anchor of the selection, read from its `x` / `width` and
+    /// `y` / `height`. `None` for the component root and without a selection. Inside a layout
+    /// these are only what is written (a layout decides the position; see `can_set_anchor`).
+    pub fn anchors(&self) -> Option<(Anchor, Anchor)> {
+        let path = self.selection.as_ref()?;
+        if path.indices.is_empty() {
+            return None;
+        }
+        let info = self.doc.element(path)?;
+        Some((anchor_of(&info, Axis::H), anchor_of(&info, Axis::V)))
+    }
+
+    /// Whether anchors apply to the selection: a free-placed child whose container is in the
+    /// preview.
+    pub fn can_set_anchor(&self) -> bool {
+        self.movable().is_ok_and(|(path, _, in_layout)| {
+            !in_layout && self.parent_length(&path, Axis::H).is_some()
+        })
+    }
+
+    /// The size of the container of `path` along `axis`: what `parent.width` / `parent.height`
+    /// is for it, from the preview.
+    fn parent_length(&self, path: &ElementPath, axis: Axis) -> Option<f32> {
+        let mut parent = path.clone();
+        parent.indices.pop();
+        Some(span(&self.hit_of(&parent)?.local, axis).1)
+    }
+
+    fn need_parent_length(&self, path: &ElementPath, axis: Axis) -> Result<f64, SessionError> {
+        self.parent_length(path, axis).map(f64::from).ok_or(SessionError::NoGeometry)
+    }
+
+    /// Switches the anchor of one axis of the selection to `kind`, keeping the element where
+    /// it is on screen (and as large) in the current preview; one history step. Refused in a
+    /// layout and for an axis written as some other expression.
+    pub fn set_anchor(&mut self, axis: Axis, kind: Kind) -> Result<(), SessionError> {
+        let (path, hit, in_layout) = self.movable()?;
+        if in_layout {
+            return Err(SessionError::InLayout);
+        }
+        let info = self
+            .doc
+            .element(&path)
+            .ok_or_else(|| EditError::ElementNotFound(path.clone()))?;
+        let current = anchor_of(&info, axis);
+        if current == Anchor::Expr {
+            return Err(expr_refusal());
+        }
+        if current.kind() == Some(kind) {
+            return Ok(());
+        }
+        let (pos, size) = span(&hit.local, axis);
+        let parent = self.need_parent_length(&path, axis)?;
+        let anchor = anchor::solve(kind, f64::from(pos), f64::from(size), parent);
+        // Leaving `Stretch` the size was an expression: it becomes the length it has now.
+        let size_px = matches!(current, Anchor::Stretch(..)).then_some(size);
+        let bindings = anchor_bindings(axis, anchor, size_px);
+        self.apply_validated(Op::SetBindings { path, bindings })
+    }
+
     pub fn move_selection(&mut self, dx: f32, dy: f32) -> Result<(), SessionError> {
         let (path, hit, in_layout) = self.movable()?;
         if in_layout {
             return Err(SessionError::InLayout);
+        }
+        let info = self
+            .doc
+            .element(&path)
+            .ok_or_else(|| EditError::ElementNotFound(path.clone()))?;
+        let axes = [(Axis::H, dx), (Axis::V, dy)].map(|(a, d)| (a, anchor_of(&info, a), d));
+        if !axes.iter().all(|&(_, a, _)| is_start(a)) {
+            return self.move_anchored(path, &hit, &axes);
         }
         let x = snap(hit.local.x + dx, self.grid);
         let y = snap(hit.local.y + dy, self.grid);
@@ -858,6 +985,35 @@ impl Session {
                 ("y".into(), Some(format!("{y}px"))),
             ],
         })
+    }
+
+    /// A move with at least one axis not anchored at the start: each axis keeps its anchor and
+    /// only its numbers change.
+    fn move_anchored(
+        &mut self,
+        path: ElementPath,
+        hit: &Hit,
+        axes: &[(Axis, Anchor, f32); 2],
+    ) -> Result<(), SessionError> {
+        if axes.iter().any(|&(_, a, d)| a == Anchor::Expr && d != 0.0) {
+            return Err(expr_refusal());
+        }
+        let mut bindings = Vec::new();
+        for &(axis, anchor, d) in axes {
+            let (pos, size) = span(&hit.local, axis);
+            let new = snap(pos + d, self.grid);
+            match anchor {
+                Anchor::Expr => {}
+                Anchor::Start(_) => bindings.push((axis.pos().to_string(), Some(format!("{new}px")))),
+                other => {
+                    let parent = self.need_parent_length(&path, axis)?;
+                    let kind = other.kind().expect("not an expression");
+                    let solved = anchor::solve(kind, f64::from(new), f64::from(size), parent);
+                    bindings.extend(anchor_bindings(axis, solved, None));
+                }
+            }
+        }
+        self.apply(Op::SetBindings { path, bindings })
     }
 
     pub fn resize_selection(
@@ -887,6 +1043,15 @@ impl Session {
         } else {
             b = (snap(bottom + dy, g) as f32).max(top + MIN_SIZE);
         }
+        let info = self
+            .doc
+            .element(&path)
+            .ok_or_else(|| EditError::ElementNotFound(path.clone()))?;
+        let axes = [(Axis::H, (left, right, l, rt)), (Axis::V, (top, bottom, t, b))]
+            .map(|(a, edges)| (a, anchor_of(&info, a), edges));
+        if !in_layout && !axes.iter().all(|&(_, a, _)| is_start(a)) {
+            return self.resize_anchored(path, &axes);
+        }
         let mut bindings = Vec::new();
         if !in_layout {
             bindings.push(("x".into(), Some(format!("{}px", l as i32))));
@@ -901,6 +1066,41 @@ impl Session {
             Some(format!("{}px", (b - t).round() as i32)),
         ));
         self.apply(Op::SetBindings { path, bindings })
+    }
+
+    /// A resize with at least one axis not anchored at the start. Edges are
+    /// `(old start, old end, new start, new end)`; an axis keeps its anchor, and only the numbers
+    /// of the edges that moved change.
+    fn resize_anchored(
+        &mut self,
+        path: ElementPath,
+        axes: &[(Axis, Anchor, Edges); 2],
+    ) -> Result<(), SessionError> {
+        let same = |a: f32, b: f32| (a - b).abs() < 0.001;
+        let (mut positions, mut sizes) = (Vec::new(), Vec::new());
+        for &(axis, anchor, (old_a, old_b, a, b)) in axes {
+            let unchanged = same(old_a, a) && same(old_b, b);
+            let size = b - a;
+            match anchor {
+                Anchor::Expr if unchanged => {}
+                Anchor::Expr => return Err(expr_refusal()),
+                Anchor::Start(_) => {
+                    positions.push((axis.pos().to_string(), Some(format!("{}px", a as i32))));
+                    sizes.push((axis.size().to_string(), Some(format!("{}px", size.round() as i32))));
+                }
+                _ if unchanged => {}
+                other => {
+                    let parent = self.need_parent_length(&path, axis)?;
+                    let kind = other.kind().expect("not an expression");
+                    let solved = anchor::solve(kind, f64::from(a), f64::from(size), parent);
+                    let mut written = anchor_bindings(axis, solved, Some(size)).into_iter();
+                    positions.extend(written.next());
+                    sizes.extend(written);
+                }
+            }
+        }
+        positions.extend(sizes);
+        self.apply(Op::SetBindings { path, bindings: positions })
     }
 
     /// Applies an edit. While the preview is stale (`diagnostics` non-empty) structural ops
@@ -1119,7 +1319,64 @@ impl Session {
         if current == expr.clone().unwrap_or_default() {
             return Ok(());
         }
+        if let Some(bindings) = self.anchored_geometry(&path, name, expr.as_deref())? {
+            return self.apply_validated(Op::SetBindings { path, bindings });
+        }
         self.apply_validated(Op::SetBindings { path, bindings: vec![(name.to_string(), expr)] })
+    }
+
+    /// The bindings for a length typed into `x` / `y` / `width` / `height` of an element whose
+    /// axis is anchored at the end, centre or both sides: the typed number is the position (or
+    /// size) it gets and the anchor stays, only its numbers change. `None` when the usual
+    /// write applies: another property, a layout child, an axis anchored at the start, a
+    /// removal, or an expression typed on purpose. A number on an axis written as some other
+    /// expression, or a size on a stretched axis, is refused.
+    fn anchored_geometry(
+        &self,
+        path: &ElementPath,
+        name: &str,
+        expr: Option<&str>,
+    ) -> Result<Option<Vec<Binding>>, SessionError> {
+        let axis = match name {
+            "x" | "width" => Axis::H,
+            "y" | "height" => Axis::V,
+            _ => return Ok(None),
+        };
+        let Some(typed) = expr.and_then(anchor::plain_length) else { return Ok(None) };
+        if path.indices.is_empty() {
+            return Ok(None);
+        }
+        let mut parent = path.clone();
+        parent.indices.pop();
+        if self.doc.element(&parent).is_none_or(|p| matches!(p.kind, ElementKind::Layout(_))) {
+            return Ok(None);
+        }
+        let info = self
+            .doc
+            .element(path)
+            .ok_or_else(|| EditError::ElementNotFound(path.clone()))?;
+        let anchor = anchor_of(&info, axis);
+        let Some(kind) = anchor.kind() else { return Err(expr_refusal()) };
+        if kind == Kind::Start {
+            return Ok(None);
+        }
+        let is_size = name == axis.size();
+        if is_size && kind == Kind::Stretch {
+            let what = match axis {
+                Axis::H => "左右に付いているため幅は数では決められません",
+                Axis::V => "上下に付いているため高さは数では決められません",
+            };
+            return Err(SessionError::Anchor(what.into()));
+        }
+        if is_size {
+            // End and centre keep B / C: only the length changes.
+            return Ok(Some(vec![(name.to_string(), expr.map(str::to_string))]));
+        }
+        let hit = self.selection_hit().ok_or(SessionError::NoGeometry)?;
+        let size = span(&hit.local, axis).1;
+        let parent = self.need_parent_length(path, axis)?;
+        let solved = anchor::solve(kind, typed, f64::from(size), parent);
+        Ok(Some(anchor_bindings(axis, solved, None)))
     }
 
     /// Applies `op` after trying it on a scratch copy: refused with `Rejected` (nothing
@@ -1536,6 +1793,26 @@ impl Session {
         self.live.borrow().as_ref()?.geometry(info.start)
     }
 
+    /// Wrapping into a layout drops the children's `x` / `y`, and unwrapping writes them
+    /// again, so an anchor other than left / top would be lost: refused.
+    fn refuse_anchored_children(
+        &self,
+        parent: &ElementPath,
+        count: usize,
+    ) -> Result<(), SessionError> {
+        let anchored = (0..count).any(|i| {
+            self.doc.element(&Self::child_path(parent, i)).is_some_and(|c| {
+                [Axis::H, Axis::V].iter().any(|&a| {
+                    matches!(
+                        anchor_of(&c, a),
+                        Anchor::End(_) | Anchor::Center(_) | Anchor::Stretch(..)
+                    )
+                })
+            })
+        });
+        if anchored { Err(SessionError::Anchor(ANCHORED_CHILD.into())) } else { Ok(()) }
+    }
+
     /// Wraps the children of the selected container in an inferred layout and selects it.
     /// The positions come from the live preview; nothing changes when any is missing.
     pub fn stack_selection(&mut self) -> Result<Vec<tidy::Warning>, SessionError> {
@@ -1557,6 +1834,7 @@ impl Session {
                 .into());
             }
         }
+        self.refuse_anchored_children(&path, info.child_count)?;
         let container = self.hit_of(&path).ok_or(SessionError::NoGeometry)?;
         let children = (0..info.child_count)
             .map(|i| self.hit_of(&Self::child_path(&path, i)).map(|h| h.local))
@@ -1626,20 +1904,75 @@ impl Session {
         for ((ci, old), new) in infos.iter().zip(&children).zip(&out.rects) {
             let mut bindings = Vec::new();
             let current = |n: &str| ci.bindings.iter().find(|b| b.name == n).map(|b| b.expr.trim());
-            let mut set = |name: &str, old: f32, new: f32| {
-                let text = format!("{}px", new.round() as i32);
-                // Only a different written value counts as a change.
-                if !near(old, new) && current(name) != Some(text.as_str()) {
-                    bindings.push((name.to_string(), Some(text)));
+            let anchors = [Axis::H, Axis::V].map(|a| (a, anchor_of(ci, a)));
+            if anchors.iter().all(|&(_, a)| is_start(a)) {
+                let mut set = |name: &str, old: f32, new: f32| {
+                    let text = format!("{}px", new.round() as i32);
+                    // Only a different written value counts as a change.
+                    if !near(old, new) && current(name) != Some(text.as_str()) {
+                        bindings.push((name.to_string(), Some(text)));
+                    }
+                };
+                set("x", old.rect.x, new.x);
+                set("y", old.rect.y, new.y);
+                if old.w_explicit {
+                    set("width", old.rect.w, new.w);
                 }
-            };
-            set("x", old.rect.x, new.x);
-            set("y", old.rect.y, new.y);
-            if old.w_explicit {
-                set("width", old.rect.w, new.w);
-            }
-            if old.h_explicit {
-                set("height", old.rect.h, new.h);
+                if old.h_explicit {
+                    set("height", old.rect.h, new.h);
+                }
+            } else {
+                let explicit = [old.w_explicit, old.h_explicit];
+                let parent_len = [container.local.w, container.local.h];
+                let (mut positions, mut sizes) = (Vec::new(), Vec::new());
+                for (i, (axis, anchor)) in anchors.into_iter().enumerate() {
+                    let ((old_pos, old_size), (new_pos, new_size)) =
+                        (span(&old.rect, axis), span(new, axis));
+                    // A length that is not written is not changed.
+                    let new_size = if explicit[i] { new_size } else { old_size };
+                    if near(old_pos, new_pos) && near(old_size, new_size) {
+                        continue;
+                    }
+                    let push = |into: &mut Vec<(String, Option<String>)>, name: &str, text: String| {
+                        if current(name) != Some(text.as_str()) {
+                            into.push((name.to_string(), Some(text)));
+                        }
+                    };
+                    match anchor {
+                        Anchor::Expr => return Err(expr_refusal()),
+                        Anchor::Start(_) => {
+                            if !near(old_pos, new_pos) {
+                                push(&mut positions, axis.pos(), format!("{}px", new_pos.round() as i32));
+                            }
+                            if explicit[i] && !near(old_size, new_size) {
+                                push(&mut sizes, axis.size(), format!("{}px", new_size.round() as i32));
+                            }
+                        }
+                        other => {
+                            let kind = other.kind().expect("not an expression");
+                            let solved = anchor::solve(
+                                kind,
+                                f64::from(new_pos),
+                                f64::from(new_size),
+                                f64::from(parent_len[i]),
+                            );
+                            let (pos_text, size_text) =
+                                anchor::write(axis, solved).expect("not an expression");
+                            push(&mut positions, axis.pos(), pos_text);
+                            match size_text {
+                                Some(t) => push(&mut sizes, axis.size(), t),
+                                None if explicit[i] && !near(old_size, new_size) => push(
+                                    &mut sizes,
+                                    axis.size(),
+                                    format!("{}px", new_size.round() as i32),
+                                ),
+                                None => {}
+                            }
+                        }
+                    }
+                }
+                bindings = positions;
+                bindings.extend(sizes);
             }
             if bindings.is_empty() {
                 continue;
@@ -1714,6 +2047,7 @@ impl Session {
         let (layout, layout_info, _) = self.guide_layout().ok_or(SessionError::NotALayout)?;
         let mut parent = layout.clone();
         parent.indices.pop();
+        self.refuse_anchored_children(&layout, layout_info.child_count)?;
         let origin = self.hit_of(&parent).ok_or(SessionError::NoGeometry)?.rect;
         let positions = (0..layout_info.child_count)
             .map(|i| {
