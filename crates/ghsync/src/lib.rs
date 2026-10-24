@@ -1,0 +1,15 @@
+//! GitHub sync for petaricon projects, over the GitHub REST (Git Data) API only.
+//!
+//! No Slint, no git binary. `api` holds the `GitHubApi` trait and the ureq/rustls
+//! implementation, `state` the `.sync` file and local file helpers, `sync` the procedures.
+
+pub mod api;
+pub mod state;
+pub mod sync;
+
+pub use api::{ApiError, GitHubApi, HttpApi, NewEntry, TreeEntry, UpdateError};
+pub use state::{FileEntry, SyncState, git_blob_sha, is_managed};
+pub use sync::{
+    Change, ChangeKind, PullReport, PushReport, SyncError, clone_into, local_changes, pull, push,
+    take_remote,
+};
