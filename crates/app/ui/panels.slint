@@ -496,6 +496,14 @@ export component FileActions inherits HorizontalLayout {
 }
 
 // Menu section "Settings": the tolerance of Tidy with - / value / + (the glue steps it by 4px).
+export component GitHubActions inherits HorizontalLayout {
+    callback sync();
+    callback new-project();
+    spacing: 6px;
+    height: 44px;
+    ToolButton { text: "GitHub"; min-width: 72px; clicked => { root.sync(); } }
+    ToolButton { text: "GitHub から新しいプロジェクト"; horizontal-stretch: 1; clicked => { root.new-project(); } }
+}
 export component SettingsSection inherits VerticalLayout {
     in property <int> tolerance;
     callback step(int);

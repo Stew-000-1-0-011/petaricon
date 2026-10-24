@@ -13,6 +13,7 @@ preview = { path = "../preview" }
 tidy = { path = "../tidy" }
 thiserror = "2"
 storage = { path = "../storage" }
+ghsync = { path = "../ghsync" }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 slint = { version = "=1.18.1", default-features = false, features = ["backend-winit", "renderer-femtovg"] }
@@ -26,6 +27,7 @@ slint-build = "=1.18.1"
 [dev-dependencies]
 i-slint-backend-testing = "=1.18.1"
 tempfile = "3"
+ghsync = { path = "../ghsync", features = ["test-support"] }
 
 [package.metadata.android]
 package = "dev.petaricon.editor"
@@ -34,6 +36,9 @@ build_targets = ["aarch64-linux-android"]
 [package.metadata.android.signing.release]
 path = "/root/.android/debug.keystore"
 keystore_password = "android"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
 
 [package.metadata.android.sdk]
 min_sdk_version = 26

@@ -9,10 +9,13 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use slint_doc::Document;
 use storage::ProjectStore;
 
+use crate::github::ApiFactory;
 use crate::nav::{self, Nav};
 use crate::session::{Corner, PreviewKind, Session, TidyReport, TreeAction, TreeRow, parse_screen_size};
 use crate::tidy_overlay::{self, MarkKind};
 use crate::{Editor, GuideBand, PreviewItem, PropItem, TidyMark, TreeRowItem};
+
+mod gh;
 
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 4.0;
@@ -266,6 +269,11 @@ pub struct Glue {
     nav: Nav,
     /// The last Tidy, drawn over the canvas until the next edit or selection change.
     tidy_report: Option<TidyReport>,
+    /// Makes the GitHub client (a fake in tests).
+    api: ApiFactory,
+    /// The GitHub transfer in flight, if any.
+    gh_job: Option<gh::Running>,
+    gh_timer: slint::Timer,
 }
 
 /// A preview value (or `@size`) edit with the document and component it was typed for.
@@ -1445,9 +1453,28 @@ fn connect(editor: &Editor, glue: &Shared) {
     on!(on_recovery_answered, |g, r| g.recovery_answered(r));
     on!(on_file_op_run, |g, m, n, p| g.file_op_run(m, &n, &p));
     on!(on_guide_edited, |g, p, v| g.guide_edited(&p, &v));
+    on!(on_gh_open, |g| g.gh_open());
+    on!(on_gh_open_new, |g| g.gh_open_new());
+    on!(on_gh_token_set, |g, t| g.gh_token_set(&t));
+    on!(on_gh_token_clear, |g| g.gh_token_clear());
+    on!(on_gh_pull, |g| g.gh_pull());
+    on!(on_gh_push, |g, m| g.gh_push(&m));
+    on!(on_gh_import, |g, r, b, f, n| g.gh_import(&r, &b, &f, &n));
+    on!(on_gh_take_remote, |g, p| g.gh_take_remote(&p));
+    on!(on_gh_keep_local, |g, p| g.gh_keep_local(&p));
+    on!(on_gh_closed, |g| g.gh_closed());
 }
 
 pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint::PlatformError> {
+    start_with(editor, store, crate::github::http_factory())
+}
+
+/// Like `start`, with the GitHub client made by `api` (tests pass a fake).
+pub fn start_with(
+    editor: &Editor,
+    store: Box<dyn ProjectStore>,
+    api: ApiFactory,
+) -> Result<(), slint::PlatformError> {
     let (project, file) = startup_target(&*store).map_err(platform_err)?;
 
     let tolerance = stored_tolerance(&*store);
@@ -1485,6 +1512,9 @@ pub fn start(editor: &Editor, store: Box<dyn ProjectStore>) -> Result<(), slint:
             tolerance,
             tidy_report: None,
             nav: Nav::default(),
+            api,
+            gh_job: None,
+            gh_timer: slint::Timer::default(),
         })
     });
     connect(editor, &glue);

@@ -10,6 +10,11 @@ serde_json = "1"
 sha1 = "0.10"
 ureq = { version = "2", features = ["json"] }
 
+[features]
+# An in-memory GitHub (`ghsync::fake`) for tests of this and other crates.
+test-support = []
+
 [dev-dependencies]
+ghsync = { path = ".", features = ["test-support"] }
 tempfile = "3"
 serde_json = "1"

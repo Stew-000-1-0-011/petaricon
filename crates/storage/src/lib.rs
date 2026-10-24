@@ -16,6 +16,10 @@ const LAST_OPEN: &str = ".last-open";
 /// Small `key=value` settings of the editor; lives in the store root.
 const SETTINGS: &str = ".settings";
 
+/// The GitHub token; its own file in the store root (not a setting, so it is never listed or
+/// echoed with them). Readable by the app only where the platform allows it.
+const GITHUB_TOKEN: &str = ".github-token";
+
 /// The only keys `setting` / `set_setting` accept.
 pub const SETTING_KEYS: [&str; 1] = ["tidy_tolerance"];
 
@@ -226,6 +230,20 @@ pub trait ProjectStore {
     fn set_setting(&self, key: &str, value: &str) -> io::Result<()> {
         check_setting(key, Some(value))
     }
+    /// The project's folder on disk (it need not exist yet), for stores backed by files.
+    fn project_path(&self, _project: &str) -> Option<PathBuf> {
+        None
+    }
+    /// The GitHub token, if one is stored.
+    fn github_token(&self) -> Option<String> {
+        None
+    }
+    fn set_github_token(&self, _token: &str) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "no place to keep a token"))
+    }
+    fn clear_github_token(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub struct LocalStore {
@@ -311,6 +329,39 @@ impl ProjectStore for LocalStore {
 
     fn location(&self, project: &str, file: &str) -> Option<PathBuf> {
         self.file_path(project, file).ok()
+    }
+
+    fn project_path(&self, project: &str) -> Option<PathBuf> {
+        self.project_dir(project).ok()
+    }
+
+    fn github_token(&self) -> Option<String> {
+        let text = fs::read_to_string(self.root.join(GITHUB_TOKEN)).ok()?;
+        let t = text.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    }
+
+    fn set_github_token(&self, token: &str) -> io::Result<()> {
+        let token = token.trim();
+        if token.is_empty() || token.contains(|c: char| c.is_whitespace() || c.is_control()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid token"));
+        }
+        let tmp = self.root.join(".github-token.tmp");
+        {
+            use std::io::Write;
+            let mut opts = fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+            let mut f = opts.open(&tmp)?;
+            f.write_all(token.as_bytes())?;
+            f.write_all(b"\n")?;
+        }
+        fs::rename(&tmp, self.root.join(GITHUB_TOKEN))
+    }
+
+    fn clear_github_token(&self) -> io::Result<()> {
+        remove_if_exists(&self.root.join(GITHUB_TOKEN))
     }
 
     fn projects(&self) -> io::Result<Vec<String>> {
@@ -679,6 +730,45 @@ mod tests {
         s.write("p", "a.slint", "x").unwrap(); // creates a.slint.bak
         std::fs::create_dir(d.path().join("projects/p/sub.slint")).unwrap();
         assert_eq!(s.files("p").unwrap(), vec!["a.slint", "b.slint", "main.slint"]);
+    }
+
+    #[test]
+    fn github_token_roundtrip_is_private_and_not_a_setting() {
+        let (d, s) = store();
+        assert_eq!(s.github_token(), None);
+        s.set_github_token("  github_pat_abcd1234\n").unwrap();
+        assert_eq!(s.github_token().as_deref(), Some("github_pat_abcd1234"));
+        let path = d.path().join("projects/.github-token");
+        assert!(path.is_file());
+        assert!(!d.path().join("projects/.github-token.tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // Not reachable through the settings, and settings writes leave it alone.
+        assert_eq!(s.setting(".github-token"), None);
+        assert!(s.set_setting(".github-token", "x").is_err());
+        s.set_setting("tidy_tolerance", "20").unwrap();
+        assert_eq!(s.github_token().as_deref(), Some("github_pat_abcd1234"));
+        s.set_github_token("ghp_second").unwrap();
+        assert_eq!(s.github_token().as_deref(), Some("ghp_second"));
+        for bad in ["", "  ", "a b", "a\nb"] {
+            assert_eq!(s.set_github_token(bad).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        }
+        assert_eq!(s.github_token().as_deref(), Some("ghp_second"));
+        s.clear_github_token().unwrap();
+        assert_eq!(s.github_token(), None);
+        s.clear_github_token().unwrap();
+        assert!(s.projects().unwrap().is_empty(), "the token file is not a project");
+    }
+
+    #[test]
+    fn project_path_checks_the_name() {
+        let (d, s) = store();
+        assert_eq!(s.project_path("p"), Some(d.path().join("projects/p")));
+        assert_eq!(s.project_path("../x"), None);
+        assert_eq!(s.project_path(".hidden"), None);
     }
 
     #[test]

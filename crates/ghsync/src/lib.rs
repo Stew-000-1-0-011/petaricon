@@ -4,6 +4,8 @@
 //! implementation, `state` the `.sync` file and local file helpers, `sync` the procedures.
 
 pub mod api;
+#[cfg(feature = "test-support")]
+pub mod fake;
 pub mod state;
 pub mod sync;
 

@@ -1,5 +1,6 @@
 pub mod crashlog;
 pub mod font;
+pub mod github;
 pub mod glue;
 pub mod guides;
 pub mod layout_bridge;

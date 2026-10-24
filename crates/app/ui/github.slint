@@ -1,0 +1,278 @@
+import { ToolButton } from "panels.slint";
+
+// A tappable line showing a value. The text is typed in the input bar (see editor.slint).
+export component FieldRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <string> placeholder;
+    in property <bool> active;
+    in property <bool> enabled: true;
+    callback tapped();
+    height: 44px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: root.active ? #4fc3f7 : #3b4047;
+    background: root.active ? #2f3d4c : #23262a;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        Text {
+            text: root.label;
+            color: #9aa3ad;
+            font-size: 12px;
+            vertical-alignment: center;
+            min-width: 84px;
+            horizontal-stretch: 0;
+        }
+        Text {
+            text: root.value == "" ? root.placeholder : root.value;
+            color: root.value == "" ? #6f7782 : white;
+            font-size: 14px;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+    }
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.tapped(); }
+    }
+}
+
+component Note inherits Text {
+    color: #c3cad2;
+    font-size: 12px;
+    wrap: word-wrap;
+}
+
+// mode 1: the open project's sync (token, 取り込む, 送る, 両方で変更). mode 2: a new project from GitHub.
+export component GitHubDialog inherits Rectangle {
+    in property <int> mode;
+    in property <string> project;
+    in property <string> token-hint;
+    in property <bool> linked;
+    in property <string> link-text;
+    in property <string> status-text;
+    in property <[string]> conflicts;
+    in property <bool> busy;
+    in property <string> result;
+    in property <string> error;
+    // The field the input bar is editing ("" none).
+    in property <string> editing;
+    in property <length> top-limit: 0px;
+    in property <length> bottom-limit: 100000px;
+    in-out property <string> repo;
+    in-out property <string> branch;
+    in-out property <string> folder;
+    in-out property <string> name;
+    in-out property <string> message;
+    callback edit(string /* field */);
+    callback token-clear();
+    callback pull();
+    callback push(string /* message */);
+    callback submit-new(string /* repo */, string /* branch */, string /* folder */, string /* name */);
+    callback take-remote(string);
+    callback keep-local(string);
+    callback close();
+
+    background: #000000a0;
+    TouchArea { }
+
+    card := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: root.top-limit + 8px;
+        width: min(parent.width - 24px, 420px);
+        // Text heights are measured without wrapping, so leave some slack; the Flickable scrolls anyway.
+        height: max(160px, min(inner.preferred-height + 44px + 8px + 24px + 40px, root.bottom-limit - root.top-limit - 16px));
+        background: #2a2e33;
+        border-radius: 8px;
+        // Swallow taps that land on the card itself.
+        TouchArea { }
+        Flickable {
+            x: 12px;
+            y: 12px;
+            width: parent.width - 24px;
+            height: parent.height - 24px - 52px;
+            content-height: inner.preferred-height;
+            inner := VerticalLayout {
+                width: parent.width;
+                spacing: 8px;
+                Text {
+                    text: root.mode == 1 ? "GitHub — " + root.project : "GitHub から新しいプロジェクト";
+                    color: white;
+                    font-size: 16px;
+                    overflow: elide;
+                }
+                // Token.
+                Rectangle {
+                    height: 44px;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: root.token-hint == "" ? "トークン: 未設定" : "トークン: " + root.token-hint;
+                            color: root.token-hint == "" ? #ffcc80 : white;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        ToolButton {
+                            text: root.token-hint == "" ? "設定" : "変更";
+                            min-width: 56px;
+                            enabled: !root.busy;
+                            clicked => { root.edit("token"); }
+                        }
+                        ToolButton {
+                            text: "削除";
+                            min-width: 56px;
+                            enabled: root.token-hint != "" && !root.busy;
+                            clicked => { root.token-clear(); }
+                        }
+                    }
+                }
+                if root.mode == 2: VerticalLayout {
+                    spacing: 6px;
+                    FieldRow {
+                        label: "リポジトリ";
+                        placeholder: "owner/name";
+                        value: root.repo;
+                        active: root.editing == "repo";
+                        enabled: !root.busy;
+                        tapped => { root.edit("repo"); }
+                    }
+                    FieldRow {
+                        label: "ブランチ";
+                        placeholder: "main";
+                        value: root.branch;
+                        active: root.editing == "branch";
+                        enabled: !root.busy;
+                        tapped => { root.edit("branch"); }
+                    }
+                    FieldRow {
+                        label: "フォルダ";
+                        placeholder: "crates/app/ui(空ならリポジトリ全体)";
+                        value: root.folder;
+                        active: root.editing == "folder";
+                        enabled: !root.busy;
+                        tapped => { root.edit("folder"); }
+                    }
+                    FieldRow {
+                        label: "プロジェクト名";
+                        placeholder: "(フォルダ名)";
+                        value: root.name;
+                        active: root.editing == "name";
+                        enabled: !root.busy;
+                        tapped => { root.edit("name"); }
+                    }
+                    Note { text: "フォルダの下のファイルをすべて取り込みます。開いている文書は先に保存します。"; }
+                }
+                if root.mode == 1 && !root.linked: Note {
+                    text: "このプロジェクトは GitHub とつながっていません。メニューの「GitHub から新しいプロジェクト」で取り込んだプロジェクトで使えます。";
+                    color: #ffcc80;
+                }
+                if root.mode == 1 && root.linked: VerticalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.link-text;
+                        color: #4fc3f7;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+                    Note { text: root.status-text; }
+                    ToolButton {
+                        height: 44px;
+                        text: "取り込む";
+                        enabled: !root.busy;
+                        clicked => { root.pull(); }
+                    }
+                    FieldRow {
+                        label: "メッセージ";
+                        value: root.message;
+                        placeholder: "コミットメッセージ";
+                        active: root.editing == "message";
+                        enabled: !root.busy;
+                        tapped => { root.edit("message"); }
+                    }
+                    ToolButton {
+                        height: 44px;
+                        text: "送る";
+                        enabled: !root.busy && root.conflicts.length == 0;
+                        clicked => { root.push(root.message); }
+                    }
+                    if root.conflicts.length > 0: VerticalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "両方で変更されたファイル";
+                            color: #ffcc80;
+                            font-size: 13px;
+                        }
+                        Note {
+                            text: "ファイルごとに選んでください。「リモートの版にする」は手元の版を「名前.local」として残します。「手元の版を残す」は次に送るときに GitHub へ上書きします。すべて選ぶまで「送る」は使えません。";
+                        }
+                        for path in root.conflicts: VerticalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: path;
+                                color: white;
+                                font-size: 14px;
+                                overflow: elide;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                height: 44px;
+                                ToolButton {
+                                    text: "リモートの版にする";
+                                    horizontal-stretch: 1;
+                                    enabled: !root.busy;
+                                    clicked => { root.take-remote(path); }
+                                }
+                                ToolButton {
+                                    text: "手元の版を残す";
+                                    horizontal-stretch: 1;
+                                    enabled: !root.busy;
+                                    clicked => { root.keep-local(path); }
+                                }
+                            }
+                        }
+                    }
+                }
+                if root.busy: Text {
+                    text: "通信中…";
+                    color: #4fc3f7;
+                    font-size: 13px;
+                }
+                if root.result != "" && root.error == "": Text {
+                    text: root.result;
+                    color: #a5d6a7;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                if root.error != "": Text {
+                    text: root.error;
+                    color: #ff8a80;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+        // The buttons stay in view while the rest scrolls.
+        HorizontalLayout {
+            x: 12px;
+            y: parent.height - 12px - 44px;
+            width: parent.width - 24px;
+            height: 44px;
+            spacing: 8px;
+            ToolButton {
+                text: root.mode == 2 ? "キャンセル" : "閉じる";
+                enabled: !root.busy;
+                clicked => { root.close(); }
+            }
+            if root.mode == 2: ToolButton {
+                text: "取り込む";
+                enabled: !root.busy && root.repo != "" && root.branch != "";
+                clicked => { root.submit-new(root.repo, root.branch, root.folder, root.name); }
+            }
+        }
+    }
+}

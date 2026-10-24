@@ -1,6 +1,7 @@
 import { Palette } from "std-widgets.slint";
 import { Canvas, GuideBand, TidyMark } from "canvas.slint";
-import { BottomPanel, KbBar, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, PreviewItem, ExtractDialog, RecoveryDialog, FileActions, FileOpDialog, SettingsSection } from "panels.slint";
+import { BottomPanel, KbBar, ToolButton, MenuList, NewProject, TreeRowItem, PropItem, PreviewItem, ExtractDialog, RecoveryDialog, FileActions, FileOpDialog, SettingsSection, GitHubActions } from "panels.slint";
+import { GitHubDialog } from "github.slint";
 export { TreeRowItem, PropItem, PreviewItem, GuideBand, TidyMark }
 
 export component Editor inherits Window {
@@ -79,6 +80,24 @@ export component Editor inherits Window {
     // The project whose files the File menu lists (the glue moves it after renames).
     in-out property <string> menu-project: root.current-project;
 
+    // GitHub dialog: 0 closed, 1 the open project's sync, 2 a new project from GitHub.
+    in-out property <int> gh-mode;
+    in property <string> gh-token-hint;
+    in property <bool> gh-linked;
+    in property <string> gh-link-text;
+    in property <string> gh-status-text;
+    in property <[string]> gh-conflicts;
+    in property <bool> gh-busy;
+    in property <string> gh-result;
+    in property <string> gh-error;
+    in-out property <string> gh-repo;
+    in-out property <string> gh-branch;
+    in-out property <string> gh-folder;
+    in-out property <string> gh-name;
+    in-out property <string> gh-message: "petaricon で編集";
+    // The GitHub field the input bar edits ("" none, "token", "repo", "branch", "folder", "name", "message").
+    in-out property <string> gh-editing;
+
     callback tapped(length, length);
     callback drag-finished(length, length);
     callback resize-finished(int /* Corner */, length, length);
@@ -120,6 +139,16 @@ export component Editor inherits Window {
     callback declaration-add(int /* kind */, string /* type */, string /* name */);
     callback recovery-answered(bool);
     callback file-op-run(int /* mode */, string /* name */, string /* project */);
+    callback gh-open();
+    callback gh-open-new();
+    callback gh-token-set(string);
+    callback gh-token-clear();
+    callback gh-pull();
+    callback gh-push(string /* message */);
+    callback gh-import(string /* repo */, string /* branch */, string /* folder */, string /* name */);
+    callback gh-take-remote(string);
+    callback gh-keep-local(string);
+    callback gh-closed();
 
     init => { Palette.color-scheme = ColorScheme.dark; }
 
@@ -137,7 +166,11 @@ export component Editor inherits Window {
         || (root.kb-shown && root.prop-bottom > root.kb-y));
     out property <bool> want-guide: cv.editing-prop != "" && (root.touch-input
         || (root.kb-shown && root.content-y + cv.editing-y + 44px > root.kb-y));
-    out property <bool> bar-visible: root.want-prop || root.want-guide;
+    property <string> gh-label: root.gh-editing == "token" ? "トークン" : root.gh-editing == "repo" ? "リポジトリ"
+        : root.gh-editing == "branch" ? "ブランチ" : root.gh-editing == "folder" ? "フォルダ"
+        : root.gh-editing == "name" ? "プロジェクト名" : "メッセージ";
+    out property <bool> want-gh: root.gh-editing != "";
+    out property <bool> bar-visible: root.want-prop || root.want-guide || root.want-gh;
     // Bumped by the glue whenever the Props rows are rebuilt (selection, document or undo changed).
     in property <int> props-rev;
     // props-rev when the field got focus: bar edits for an older target are rejected.
@@ -149,6 +182,41 @@ export component Editor inherits Window {
             root.prop-editing = "";
             root.prop-flush();
         }
+    }
+    // GitHub fields: every keystroke lands in the dialog's property; the token is handed to the
+    // glue only when it is accepted (or when the bar closes with a token typed).
+    function gh-apply(field: string, t: string) {
+        if field == "repo" { root.gh-repo = t; }
+        else if field == "branch" { root.gh-branch = t; }
+        else if field == "folder" { root.gh-folder = t; }
+        else if field == "name" { root.gh-name = t; }
+        else if field == "message" { root.gh-message = t; }
+    }
+    function gh-current(field: string) -> string {
+        if field == "repo" { return root.gh-repo; }
+        if field == "branch" { return root.gh-branch; }
+        if field == "folder" { return root.gh-folder; }
+        if field == "name" { return root.gh-name; }
+        if field == "message" { return root.gh-message; }
+        return "";
+    }
+    public function gh-open-bar(field: string) {
+        root.close-prop-bar();
+        root.gh-editing = field;
+        root.bar-text = root.gh-current(field);
+        root.bar-focus-rev += 1;
+    }
+    function gh-finish(t: string) {
+        if root.gh-editing == "token" {
+            if t != "" { root.gh-token-set(t); }
+        } else {
+            root.gh-apply(root.gh-editing, t);
+        }
+        root.gh-editing = "";
+        root.bar-text = "";
+    }
+    function close-gh-bar() {
+        if root.gh-editing != "" { root.gh-finish(root.bar-text); }
     }
     // Ends a guide bar session after the keyboard went away: the typed number is kept.
     function finish-guide-bar() {
@@ -179,6 +247,7 @@ export component Editor inherits Window {
             if !root.open-guard {
                 root.close-prop-bar();
                 root.finish-guide-bar();
+                root.close-gh-bar();
             }
         }
     }
@@ -192,6 +261,7 @@ export component Editor inherits Window {
         } else if !root.touch-input {
             root.close-prop-bar();
             root.finish-guide-bar();
+            root.close-gh-bar();
         }
     }
     changed props-rev => { root.prop-editing = ""; }
@@ -410,9 +480,38 @@ export component Editor inherits Window {
         Text { text: "fake keyboard"; color: white; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
     }
 
+    if root.gh-mode != 0: GitHubDialog {
+        mode: root.gh-mode;
+        project: root.current-project;
+        token-hint: root.gh-token-hint;
+        linked: root.gh-linked;
+        link-text: root.gh-link-text;
+        status-text: root.gh-status-text;
+        conflicts: root.gh-conflicts;
+        busy: root.gh-busy;
+        result: root.gh-result;
+        error: root.gh-error;
+        editing: root.gh-editing;
+        top-limit: root.inset-top;
+        bottom-limit: root.want-gh ? root.bar-y : root.kb-shown ? root.kb-y : root.height - root.inset-bottom;
+        repo <=> root.gh-repo;
+        branch <=> root.gh-branch;
+        folder <=> root.gh-folder;
+        name <=> root.gh-name;
+        message <=> root.gh-message;
+        edit(f) => { root.gh-open-bar(f); }
+        token-clear => { root.gh-token-clear(); }
+        pull => { root.gh-pull(); }
+        push(m) => { root.gh-push(m); }
+        submit-new(r, b, f, n) => { root.gh-import(r, b, f, n); }
+        take-remote(p) => { root.gh-take-remote(p); }
+        keep-local(p) => { root.gh-keep-local(p); }
+        close => { root.close-gh-bar(); root.gh-mode = 0; root.gh-closed(); }
+    }
+
     if root.bar-visible: Rectangle {
         x: 0px;
-        y: root.touch-input ? root.bar-y : root.kb-y - root.bar-h;
+        y: root.touch-input || root.want-gh ? root.bar-y : root.kb-y - root.bar-h;
         width: root.width;
         height: root.bar-h;
         background: #2a2e33;
@@ -420,16 +519,21 @@ export component Editor inherits Window {
             focus-rev: root.bar-focus-rev;
             x: root.inset-left;
             width: root.content-w;
-            label: root.want-guide ? cv.editing-prop : root.prop-editing;
+            label: root.want-gh ? root.gh-label : root.want-guide ? cv.editing-prop : root.prop-editing;
             text <=> root.bar-text;
-            input-type: root.want-guide ? InputType.number : InputType.text;
+            input-type: root.want-gh ? (root.gh-editing == "token" ? InputType.password : InputType.text)
+                : root.want-guide ? InputType.number : InputType.text;
             edited(t) => {
-                if !root.want-guide && root.prop-rev-at == root.props-rev {
+                if root.want-gh {
+                    if root.gh-editing != "token" { root.gh-apply(root.gh-editing, t); }
+                } else if !root.want-guide && root.prop-rev-at == root.props-rev {
                     root.prop-edited(root.prop-editing, t);
                 }
             }
             accepted(t) => {
-                if root.want-guide {
+                if root.want-gh {
+                    root.gh-finish(t);
+                } else if root.want-guide {
                     root.guide-bar-used = false;
                     root.guide-edited(cv.editing-prop, t);
                     cv.editing-prop = "";
@@ -488,6 +592,10 @@ export component Editor inherits Window {
                 NewProject {
                     create(n) => { root.create-project(n); root.menu-project = n; root.select-project(n); }
                     rename => { root.menu-open = false; root.dialog-error = ""; root.file-op = 3; }
+                }
+                GitHubActions {
+                    sync => { root.menu-open = false; root.gh-open(); }
+                    new-project => { root.menu-open = false; root.gh-open-new(); }
                 }
                 MenuList {
                     title: "Files";
